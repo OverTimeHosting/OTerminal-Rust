@@ -104,11 +104,18 @@ impl Entry {
                 account.login,
                 account.name.as_deref().unwrap_or_default()
             )),
-            Entry::Othcloud(account) => Some(format!(
-                "{} {}",
-                account.label,
-                account.login.as_deref().unwrap_or_default()
-            )),
+            Entry::Othcloud(account) => Some(
+                [
+                    Some(account.label.as_str()),
+                    account.login.as_deref(),
+                    account.app_name.as_deref(),
+                    account.organization_name.as_deref(),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(" "),
+            ),
             Entry::OthcloudCurrent { label } => Some(label.clone()),
             _ => None,
         }
@@ -157,12 +164,29 @@ impl GithubAccountPickerDelegate {
                 Some(accounts) => {
                     // An account saved both here and on OTHCloud shows once,
                     // as the local one.
-                    let accounts = accounts.iter().filter(|account| {
-                        !(account.kind == GithubTokenKind::User
-                            && github_id_string(&account.github_id)
-                                .is_some_and(|id| local_ids.contains(&id)))
-                    });
-                    entries.extend(accounts.cloned().map(Entry::Othcloud));
+                    let none_on_othcloud = accounts.is_empty();
+                    let accounts: Vec<&GithubAccount> = accounts
+                        .iter()
+                        .filter(|account| {
+                            !(account.kind == GithubTokenKind::User
+                                && !account.is_git_provider()
+                                && github_id_string(&account.github_id)
+                                    .is_some_and(|id| local_ids.contains(&id)))
+                        })
+                        .collect();
+                    let (providers, linked): (Vec<_>, Vec<_>) = accounts
+                        .into_iter()
+                        .partition(|account| account.is_git_provider());
+                    entries.extend(linked.into_iter().cloned().map(Entry::Othcloud));
+                    if !providers.is_empty() {
+                        entries.push(Entry::Header("OTHCloud git providers".into()));
+                        entries.extend(providers.into_iter().cloned().map(Entry::Othcloud));
+                    }
+                    if none_on_othcloud && store.othcloud_accounts_error().is_none() {
+                        entries.push(Entry::Note(
+                            "No GitHub accounts or git providers on OTHCloud yet.".into(),
+                        ));
+                    }
                 }
                 None if store.othcloud_accounts_loading() => {
                     entries.push(Entry::Note("Loading OTHCloud accounts…".into()));
@@ -368,22 +392,44 @@ impl GithubAccountPickerDelegate {
     }
 }
 
+/// The second line under an OTHCloud entry (whose title is the name OTHCloud
+/// gives it): which GitHub identity backs it, where it lives, what it can do.
 fn othcloud_account_description(account: &GithubAccount) -> String {
-    let mut description =
-        if account.kind == GithubTokenKind::Installation || account.id.starts_with("app:") {
-            "organization GitHub App".to_string()
-        } else if account.can_push {
-            "clone and push".to_string()
+    let label = account.label.trim();
+    let differs = |name: &&str| !name.is_empty() && !name.eq_ignore_ascii_case(label);
+    let mut parts = Vec::new();
+    if account.kind == GithubTokenKind::Installation {
+        parts.push(
+            match account.app_name.as_deref().map(str::trim).filter(differs) {
+                Some(app_name) => format!("GitHub App {app_name}"),
+                None => "GitHub App".to_string(),
+            },
+        );
+    } else if let Some(login) = account.login.as_deref().map(str::trim).filter(differs) {
+        parts.push(format!("@{login}"));
+    }
+    if account.is_git_provider() {
+        parts.push(match account.organization_name.as_deref() {
+            Some(organization) => format!("git provider in {organization}"),
+            None => "git provider".to_string(),
+        });
+    }
+    let access = if account.kind == GithubTokenKind::Installation {
+        if account.can_push {
+            "repos it's installed on"
         } else {
-            "read-only".to_string()
-        };
-    if account.kind == GithubTokenKind::Installation && !account.can_push {
-        description.push_str(", read-only");
-    }
+            "repos it's installed on, read-only"
+        }
+    } else if account.can_push {
+        "clone and push"
+    } else {
+        "read-only"
+    };
+    parts.push(access.to_string());
     if account.deployable {
-        description.push_str(" · deploys");
+        parts.push("deploys".to_string());
     }
-    description
+    parts.join(" · ")
 }
 
 fn local_account_description(account: &LocalGithubAccount) -> String {
@@ -697,5 +743,52 @@ impl PickerDelegate for GithubAccountPickerDelegate {
                 )),
         };
         Some(item.into_any_element())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn describes_othcloud_entries() {
+        let app = GithubAccount {
+            id: "app:1".into(),
+            kind: GithubTokenKind::Installation,
+            label: "My deploy app".into(),
+            app_name: Some("othcloud-2026-04-01".into()),
+            provider_name: Some("My deploy app".into()),
+            deployable: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            othcloud_account_description(&app),
+            "GitHub App othcloud-2026-04-01 · git provider · repos it's installed on, read-only · deploys"
+        );
+
+        let token_provider = GithubAccount {
+            id: "app:2".into(),
+            kind: GithubTokenKind::User,
+            label: "GitHub (octocat)".into(),
+            login: Some("octocat".into()),
+            organization_name: Some("Acme".into()),
+            can_push: true,
+            deployable: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            othcloud_account_description(&token_provider),
+            "@octocat · git provider in Acme · clone and push · deploys"
+        );
+
+        let linked = GithubAccount {
+            id: "user:3".into(),
+            kind: GithubTokenKind::User,
+            label: "octocat".into(),
+            login: Some("octocat".into()),
+            can_push: true,
+            ..Default::default()
+        };
+        assert_eq!(othcloud_account_description(&linked), "clone and push");
     }
 }

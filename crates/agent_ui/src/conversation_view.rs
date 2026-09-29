@@ -622,6 +622,11 @@ pub struct ConversationView {
     focus_handle: FocusHandle,
     notifications: Vec<WindowHandle<AgentNotification>>,
     notification_subscriptions: HashMap<WindowHandle<AgentNotification>, Vec<Subscription>>,
+    /// OTerminal: the agent finished or needs input while this thread wasn't
+    /// visible; cleared once it's rendered in the active window.
+    unseen_activity: bool,
+    #[cfg(test)]
+    in_app_notification_count: usize,
     auth_task: Option<Task<()>>,
     loading_status: Option<SharedString>,
     /// When settings change, use this to see if the theme has changed (which
@@ -903,6 +908,9 @@ impl ConversationView {
             ),
             notifications: Vec::new(),
             notification_subscriptions: HashMap::default(),
+            unseen_activity: false,
+            #[cfg(test)]
+            in_app_notification_count: 0,
             auth_task: None,
             loading_status: None,
             last_theme_id: Some(cx.theme().id.clone()),
@@ -1553,11 +1561,31 @@ impl ConversationView {
         &self.connection_key
     }
 
+    /// OTerminal: the active thread's title, `None` until one is known (or
+    /// while not connected). A manual rename (`title_override`) wins over the
+    /// agent's and the auto-generated title.
+    pub fn thread_title(&self, cx: &App) -> Option<SharedString> {
+        let ServerState::Connected(view) = &self.server_state else {
+            return None;
+        };
+        let active = view.active_view()?.read(cx);
+        if active.parent_session_id.is_none()
+            && let Some(title_override) = ThreadMetadataStore::try_global(cx).and_then(|store| {
+                store
+                    .read(cx)
+                    .entry(self.thread_id)
+                    .and_then(|metadata| metadata.title_override.clone())
+            })
+        {
+            return Some(title_override);
+        }
+        active.thread.read(cx).title()
+    }
+
     pub fn title(&self, cx: &App) -> SharedString {
         match &self.server_state {
-            ServerState::Connected(view) => view
-                .active_view()
-                .and_then(|v| v.read(cx).thread.read(cx).title())
+            ServerState::Connected(_) => self
+                .thread_title(cx)
                 .unwrap_or_else(|| DEFAULT_THREAD_TITLE.into()),
             ServerState::Loading { .. } => self
                 .loading_status
@@ -1803,6 +1831,13 @@ impl ConversationView {
                 );
             }
             AcpThreadEvent::TitleUpdated => {
+                // OTerminal: keep Claude Code's title unless it's poor or
+                // stale; a replacement re-emits `TitleUpdated`.
+                if let Some(active_thread) = self.thread_view(&session_id) {
+                    active_thread.update(cx, |active_thread, cx| {
+                        active_thread.reconcile_auto_title(cx);
+                    });
+                }
                 let override_title = ThreadMetadataStore::try_global(cx).and_then(|store| {
                     store
                         .read(cx)
@@ -2872,6 +2907,10 @@ impl ConversationView {
     }
 
     fn is_visible_in_agent_panel(&self, workspace: &Entity<Workspace>, cx: &Context<Self>) -> bool {
+        // OTerminal: a thread shown as the active Claude Code tab is visible too.
+        if self.is_visible_as_tab(workspace, cx) {
+            return true;
+        }
         AgentPanel::is_visible(workspace, cx)
             && workspace
                 .read(cx)
@@ -2922,29 +2961,55 @@ impl ConversationView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let should_notify = !self.agent_status_visible(window, cx);
+
+        if !should_notify {
+            return;
+        }
+        self.set_unseen_activity(true, cx);
+
         if !self.notifications.is_empty() {
             return;
         }
 
         let settings = AgentSettings::get_global(cx);
 
-        let should_notify = !self.agent_status_visible(window, cx);
-
-        if !should_notify {
-            return;
-        }
-
         let Some(root_thread) = self.root_thread_view() else {
             return;
         };
-        let root_thread = root_thread.read(cx).thread.read(cx);
         let root_thread_id = self.thread_id;
-        let root_work_dirs = root_thread.work_dirs().cloned();
-        let root_title = root_thread.title();
+        let root_work_dirs = root_thread.read(cx).thread.read(cx).work_dirs().cloned();
+        // OTerminal: the thread's (AI or renamed) title, not the raw one.
+        let root_title = self.thread_title(cx);
 
         let title = root_title
             .clone()
             .unwrap_or_else(|| self.agent.agent_id().0);
+
+        // OTerminal: while the window is focused (the thread just isn't
+        // visible), an in-app toast instead of a popup window.
+        let workspace_in_front = window
+            .root::<MultiWorkspace>()
+            .flatten()
+            .map_or(true, |multi_workspace| {
+                self.workspace
+                    .upgrade()
+                    .is_some_and(|workspace| multi_workspace.read(cx).workspace() == &workspace)
+            });
+        if window.is_window_active()
+            && workspace_in_front
+            && settings.notify_when_agent_waiting != NotifyWhenAgentWaiting::Never
+        {
+            self.show_in_app_toast(
+                caption.into(),
+                title,
+                root_thread_id,
+                root_work_dirs,
+                root_title,
+                cx,
+            );
+            return;
+        }
 
         match settings.notify_when_agent_waiting {
             NotifyWhenAgentWaiting::PrimaryScreen => {
@@ -3048,26 +3113,15 @@ impl ConversationView {
                                                 window,
                                                 cx,
                                             );
-                                            workspace.update(cx, |workspace, cx| {
-                                                workspace.reveal_panel::<AgentPanel>(window, cx);
-                                                if let Some(panel) =
-                                                    workspace.panel::<AgentPanel>(cx)
-                                                {
-                                                    panel.update(cx, |panel, cx| {
-                                                        panel.load_agent_thread(
-                                                            agent.clone(),
-                                                            root_thread_id,
-                                                            root_work_dirs.clone(),
-                                                            root_title.clone(),
-                                                            true,
-                                                            AgentThreadSource::AgentPanel,
-                                                            window,
-                                                            cx,
-                                                        );
-                                                    });
-                                                }
-                                                workspace.focus_panel::<AgentPanel>(window, cx);
-                                            });
+                                            Self::reveal_thread(
+                                                &workspace,
+                                                agent.clone(),
+                                                root_thread_id,
+                                                root_work_dirs.clone(),
+                                                root_title.clone(),
+                                                window,
+                                                cx,
+                                            );
                                         }
                                     })
                                     .log_err();
@@ -3140,6 +3194,122 @@ impl ConversationView {
                 ));
             }
         }
+    }
+
+    /// OTerminal: shows a thread: focuses its Claude Code tab when it's open
+    /// as one, otherwise opens it in the agent panel.
+    pub(crate) fn reveal_thread(
+        workspace: &Entity<Workspace>,
+        agent: Agent,
+        thread_id: ThreadId,
+        work_dirs: Option<PathList>,
+        title: Option<SharedString>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        workspace.update(cx, |workspace, cx| {
+            let project = workspace.project().clone();
+            if let Some(tab) = crate::claude_tab::ClaudeTab::find(&project, thread_id, cx) {
+                workspace.activate_item(&tab, true, true, window, cx);
+                return;
+            }
+            workspace.reveal_panel::<AgentPanel>(window, cx);
+            if let Some(panel) = workspace.panel::<AgentPanel>(cx) {
+                panel.update(cx, |panel, cx| {
+                    panel.load_agent_thread(
+                        agent,
+                        thread_id,
+                        work_dirs,
+                        title,
+                        true,
+                        AgentThreadSource::AgentPanel,
+                        window,
+                        cx,
+                    );
+                });
+            }
+            workspace.focus_panel::<AgentPanel>(window, cx);
+        });
+    }
+
+    fn show_in_app_toast(
+        &mut self,
+        caption: SharedString,
+        title: SharedString,
+        thread_id: ThreadId,
+        work_dirs: Option<PathList>,
+        root_title: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        #[cfg(test)]
+        {
+            self.in_app_notification_count += 1;
+        }
+        let agent = self.connection_key.clone();
+        let weak_workspace = workspace.downgrade();
+        let message = format!("{title} \u{2014} {caption}");
+        cx.defer(move |cx| {
+            workspace.update(cx, |workspace, cx| {
+                let toast = notifications::status_toast::StatusToast::new(message, cx, |this, _| {
+                    this.icon(
+                        Icon::new(IconName::AiClaude)
+                            .size(IconSize::Small)
+                            .color(Color::Accent),
+                    )
+                    .action("Show", move |window, cx| {
+                        if let Some(workspace) = weak_workspace.upgrade() {
+                            Self::reveal_thread(
+                                &workspace,
+                                agent.clone(),
+                                thread_id,
+                                work_dirs.clone(),
+                                root_title.clone(),
+                                window,
+                                cx,
+                            );
+                        }
+                    })
+                    .dismiss_button(true)
+                });
+                workspace.toggle_status_toast(toast, cx);
+            });
+        });
+    }
+
+    /// OTerminal: whether this conversation is the active tab of a pane.
+    fn is_visible_as_tab(&self, workspace: &Entity<Workspace>, cx: &Context<Self>) -> bool {
+        let this = cx.entity_id();
+        workspace.read(cx).panes().iter().any(|pane| {
+            pane.read(cx)
+                .active_item()
+                .and_then(|item| item.downcast::<crate::claude_tab::ClaudeTab>())
+                .is_some_and(|tab| tab.read(cx).conversation_view().entity_id() == this)
+        })
+    }
+
+    /// OTerminal: marks (or clears) activity the user hasn't seen yet, shown
+    /// as a dot on the thread's tab and on the agent panel button.
+    fn set_unseen_activity(&mut self, unseen: bool, cx: &mut Context<Self>) {
+        if self.unseen_activity == unseen {
+            return;
+        }
+        self.unseen_activity = unseen;
+        cx.notify();
+        if let Some(panel) = self
+            .workspace
+            .upgrade()
+            .and_then(|workspace| workspace.read(cx).panel::<AgentPanel>(cx))
+        {
+            // Deferred: this can run while the panel is being updated.
+            cx.defer(move |cx| panel.update(cx, |_, cx| cx.notify()));
+        }
+    }
+
+    pub fn has_unseen_activity(&self) -> bool {
+        self.unseen_activity
     }
 
     pub(crate) fn dismiss_notifications(&mut self, cx: &mut Context<Self>) -> bool {
@@ -3400,6 +3570,12 @@ impl ConversationView {
 
 impl Render for ConversationView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // OTerminal: being drawn in the active window means the user can see it.
+        if self.unseen_activity && window.is_window_active() {
+            cx.defer_in(window, |this, _window, cx| {
+                this.set_unseen_activity(false, cx);
+            });
+        }
         self.sync_request_elicitation_states(window, cx);
         let request_elicitation_connection = self.request_elicitation_connection();
         let active_thread_renders_request_elicitations =
@@ -5032,11 +5208,10 @@ pub(crate) mod tests {
 
         cx.run_until_parked();
 
-        // Should show notification because window is active but panel is hidden
+        // Should notify because window is active but panel is hidden
+        // (OTerminal: in-app, since the window is focused).
         assert!(
-            cx.windows()
-                .iter()
-                .any(|window| window.downcast::<AgentNotification>().is_some()),
+            has_notified(&conversation_view, cx),
             "Expected notification when panel is hidden"
         );
     }
@@ -5167,9 +5342,7 @@ pub(crate) mod tests {
         cx.run_until_parked();
 
         assert!(
-            cx.windows()
-                .iter()
-                .any(|window| window.downcast::<AgentNotification>().is_some()),
+            has_notified(&conversation_view, cx),
             "Expected notification when a different conversation is active in the visible panel"
         );
     }
@@ -5328,9 +5501,7 @@ pub(crate) mod tests {
         cx.run_until_parked();
 
         assert!(
-            cx.windows()
-                .iter()
-                .any(|window| window.downcast::<AgentNotification>().is_some()),
+            has_notified(&conversation_view, cx),
             "Expected notification when the sidebar is open but the thread list is hidden"
         );
     }
@@ -5391,6 +5562,8 @@ pub(crate) mod tests {
             editor.set_text("Hello", window, cx);
         });
 
+        // OTerminal: popups are for an unfocused window (focused gets a toast).
+        cx.deactivate_window();
         active_thread(&conversation_view, cx)
             .update_in(cx, |view, window, cx| view.send(window, cx));
 
@@ -5410,6 +5583,7 @@ pub(crate) mod tests {
                 mw.open_sidebar(cx);
             })
             .unwrap();
+        cx.update(|window, _| window.activate_window());
 
         cx.run_until_parked();
 
@@ -10185,6 +10359,278 @@ pub(crate) mod tests {
         thread.read_with(cx, |thread, _cx| {
             assert_eq!(thread.title(), Some("My Custom Title".into()));
         });
+    }
+
+    fn claude_tab_label(
+        tab: &Entity<crate::claude_tab::ClaudeTab>,
+        cx: &mut VisualTestContext,
+    ) -> SharedString {
+        cx.read(|cx| tab.read(cx).tab_content_text(0, cx))
+    }
+
+    fn send_title_update(
+        connection: &StubAgentConnection,
+        conversation_view: &Entity<ConversationView>,
+        title: &str,
+        cx: &mut VisualTestContext,
+    ) {
+        let session_id = active_thread(conversation_view, cx)
+            .read_with(cx, |view, cx| view.thread.read(cx).session_id().clone());
+        cx.update(|_, cx| {
+            connection.send_update(
+                session_id,
+                acp::SessionUpdate::SessionInfoUpdate(acp::SessionInfoUpdate::new().title(title)),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    async fn test_adapter_title_update_applies_to_claude_tab(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let connection = StubAgentConnection::new();
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::new(connection.clone()), cx).await;
+        let project = conversation_view.read_with(cx, |view, _| view.project.clone());
+        let tab = cx.update(|_, cx| {
+            cx.new(|cx| crate::claude_tab::ClaudeTab::new(conversation_view.clone(), project, cx))
+        });
+        assert_eq!(claude_tab_label(&tab, cx), "Claude Code");
+
+        message_editor(&conversation_view, cx).update_in(cx, |editor, window, cx| {
+            editor.set_text("Hi Claude, can you fix the login redirect please?", window, cx);
+        });
+        active_thread(&conversation_view, cx)
+            .update_in(cx, |view, window, cx| view.send(window, cx));
+        cx.run_until_parked();
+
+        // A local title right away...
+        assert_eq!(claude_tab_label(&tab, cx), "Fix login redirect");
+
+        // ...upgraded when Claude Code sends its own.
+        send_title_update(&connection, &conversation_view, "Fix OAuth login redirect loop", cx);
+        assert_eq!(claude_tab_label(&tab, cx), "Fix OAuth login redirect loop");
+        let tooltip = cx.read(|cx| tab.read(cx).tab_tooltip_text(cx)).unwrap();
+        assert!(tooltip.contains("Fix OAuth login redirect loop"), "{tooltip}");
+    }
+
+    #[gpui::test]
+    async fn test_poor_adapter_title_after_greeting_falls_back(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let connection = StubAgentConnection::new();
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::new(connection.clone()), cx).await;
+
+        message_editor(&conversation_view, cx).update_in(cx, |editor, window, cx| {
+            editor.set_text("hi", window, cx);
+        });
+        active_thread(&conversation_view, cx)
+            .update_in(cx, |view, window, cx| view.send(window, cx));
+        cx.run_until_parked();
+        assert_eq!(
+            conversation_view.read_with(cx, |view, cx| view.thread_title(cx)),
+            None
+        );
+
+        send_title_update(&connection, &conversation_view, "Greeting", cx);
+        assert_eq!(
+            conversation_view.read_with(cx, |view, cx| view.thread_title(cx)),
+            None,
+            "a title that doesn't describe a task is dropped"
+        );
+    }
+
+    #[gpui::test]
+    async fn test_manual_rename_blocks_auto_titles(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let connection = StubAgentConnection::new();
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::new(connection.clone()), cx).await;
+
+        message_editor(&conversation_view, cx).update_in(cx, |editor, window, cx| {
+            editor.set_text("fix the login redirect", window, cx);
+        });
+        active_thread(&conversation_view, cx)
+            .update_in(cx, |view, window, cx| view.send(window, cx));
+        cx.run_until_parked();
+
+        // Persist a rename, as the title editor / "Rename Thread" do.
+        let thread_id = conversation_view.read_with(cx, |view, _| view.thread_id);
+        cx.update(|_, cx| {
+            ThreadMetadataStore::global(cx).update(cx, |store, cx| {
+                if store.entry(thread_id).is_none() {
+                    store.save(
+                        crate::thread_metadata_store::ThreadMetadata {
+                            thread_id,
+                            session_id: None,
+                            agent_id: project::AgentId::new("stub"),
+                            title: None,
+                            title_override: None,
+                            updated_at: chrono::Utc::now(),
+                            created_at: None,
+                            interacted_at: None,
+                            worktree_paths: project::WorktreePaths::from_folder_paths(
+                                &PathList::default(),
+                            ),
+                            remote_connection: None,
+                            archived: false,
+                        },
+                        cx,
+                    );
+                }
+            });
+        });
+        active_thread(&conversation_view, cx).update_in(cx, |view, window, cx| {
+            view.rename("My Custom Title".into(), window, cx);
+        });
+        cx.run_until_parked();
+
+        send_title_update(&connection, &conversation_view, "Fix OAuth login redirect", cx);
+        message_editor(&conversation_view, cx).update_in(cx, |editor, window, cx| {
+            editor.set_text("New task: update the README badges", window, cx);
+        });
+        active_thread(&conversation_view, cx)
+            .update_in(cx, |view, window, cx| view.send(window, cx));
+        cx.run_until_parked();
+
+        assert_eq!(
+            conversation_view.read_with(cx, |view, cx| view.title(cx)),
+            "My Custom Title"
+        );
+    }
+
+    struct BlankItem(FocusHandle);
+
+    impl Item for BlankItem {
+        type Event = ();
+
+        fn tab_content_text(&self, _detail: usize, _cx: &App) -> SharedString {
+            "Blank".into()
+        }
+    }
+
+    impl EventEmitter<()> for BlankItem {}
+
+    impl Focusable for BlankItem {
+        fn focus_handle(&self, _cx: &App) -> FocusHandle {
+            self.0.clone()
+        }
+    }
+
+    impl Render for BlankItem {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    /// Whether the conversation notified: a popup window, or (window
+    /// focused) an in-app toast.
+    fn has_notified(conversation_view: &Entity<ConversationView>, cx: &VisualTestContext) -> bool {
+        cx.windows()
+            .iter()
+            .any(|window| window.downcast::<AgentNotification>().is_some())
+            || conversation_view.read_with(cx, |view, _| view.in_app_notification_count > 0)
+    }
+
+    fn add_blank_item(workspace: &Entity<Workspace>, cx: &mut VisualTestContext) {
+        workspace.update_in(cx, |workspace, window, cx| {
+            let item = cx.new(|cx| BlankItem(cx.focus_handle()));
+            workspace.add_item_to_active_pane(Box::new(item), None, true, window, cx);
+        });
+    }
+
+    /// Wraps `conversation_view` in a Claude Code tab in the active pane.
+    fn add_as_claude_tab(
+        conversation_view: &Entity<ConversationView>,
+        cx: &mut VisualTestContext,
+    ) -> (Entity<Workspace>, Entity<crate::claude_tab::ClaudeTab>) {
+        let workspace = conversation_view
+            .read_with(cx, |view, _| view.workspace.upgrade())
+            .unwrap();
+        let project = conversation_view.read_with(cx, |view, _| view.project.clone());
+        let tab = cx.update(|_, cx| {
+            cx.new(|cx| crate::claude_tab::ClaudeTab::new(conversation_view.clone(), project, cx))
+        });
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.add_item_to_active_pane(Box::new(tab.clone()), None, true, window, cx);
+        });
+        (workspace, tab)
+    }
+
+    #[gpui::test]
+    async fn test_selecting_thread_open_as_tab_focuses_tab(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::default_response(), cx).await;
+        let (workspace, tab) = add_as_claude_tab(&conversation_view, cx);
+        // Another item in front of the tab.
+        add_blank_item(&workspace, cx);
+        let is_tab_active = |cx: &mut VisualTestContext| {
+            workspace.read_with(cx, |workspace, cx| {
+                workspace
+                    .active_item(cx)
+                    .is_some_and(|item| item.item_id() == tab.entity_id())
+            })
+        };
+        assert!(!is_tab_active(cx));
+
+        let (thread_id, agent) = conversation_view
+            .read_with(cx, |view, _| (view.thread_id, view.connection_key.clone()));
+        cx.update(|window, cx| {
+            ConversationView::reveal_thread(&workspace, agent, thread_id, None, None, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(is_tab_active(cx), "the thread's tab should be focused");
+    }
+
+    #[gpui::test]
+    async fn test_unseen_turn_end_in_background_tab_shows_toast_and_dot(cx: &mut TestAppContext) {
+        init_test(cx);
+
+        let (conversation_view, cx) =
+            setup_conversation_view(StubAgentServer::default_response(), cx).await;
+        let (workspace, tab) = add_as_claude_tab(&conversation_view, cx);
+        // Another item in front of the tab: the thread isn't visible.
+        add_blank_item(&workspace, cx);
+
+        message_editor(&conversation_view, cx).update_in(cx, |editor, window, cx| {
+            editor.set_text("fix the login redirect", window, cx);
+        });
+        active_thread(&conversation_view, cx)
+            .update_in(cx, |view, window, cx| view.send(window, cx));
+        cx.run_until_parked();
+
+        assert!(conversation_view.read_with(cx, |view, _| view.has_unseen_activity()));
+        // The tab renders its dot from this flag.
+        assert!(cx.read(|cx| {
+            tab.read(cx)
+                .conversation_view()
+                .read(cx)
+                .has_unseen_activity()
+        }));
+        // The window is focused: an in-app toast, not a popup window.
+        assert!(
+            !cx.windows()
+                .iter()
+                .any(|window| window.downcast::<AgentNotification>().is_some())
+        );
+
+        assert_eq!(
+            conversation_view.read_with(cx, |view, _| view.in_app_notification_count),
+            1
+        );
+
+        // Showing the tab marks it seen.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.activate_item(&tab, true, true, window, cx);
+        });
+        cx.run_until_parked();
+        assert!(!conversation_view.read_with(cx, |view, _| view.has_unseen_activity()));
     }
 
     #[gpui::test]

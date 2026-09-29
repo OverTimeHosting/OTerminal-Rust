@@ -554,6 +554,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "agents_dashboard"
+version = "0.1.0"
+dependencies = [
+ "acp_thread",
+ "agent-client-protocol",
+ "agent_ui",
+ "collections",
+ "feature_flags",
+ "gpui",
+ "log",
+ "project",
+ "regex",
+ "remote_connection",
+ "serde_json",
+ "settings",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
 name = "ahash"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7149,6 +7170,7 @@ dependencies = [
  "urlencoding",
  "util",
  "uuid",
+ "windows-registry 0.6.1",
  "ztracing",
 ]
 
@@ -22981,6 +23003,7 @@ dependencies = [
  "agent_settings",
  "agent_skills",
  "agent_ui",
+ "agents_dashboard",
  "anyhow",
  "ashpd",
  "askpass",

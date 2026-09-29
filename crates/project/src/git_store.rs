@@ -698,6 +698,8 @@ pub struct Repository {
     initial_graph_data: HashMap<(LogSource, LogOrder), InitialGitGraphData>,
     commit_data_handler: CommitDataHandlerState,
     commit_data: HashMap<Oid, CommitDataState>,
+    /// Why opening a local repository failed, see [`Repository::load_error`].
+    load_error: Option<SharedString>,
 }
 
 type RemoteAskPassDelegates = Arc<Mutex<HashMap<u64, RemoteAskPassDelegate>>>;
@@ -6442,6 +6444,13 @@ impl Repository {
         }
     }
 
+    /// Why this repository could not be opened (e.g. no git binary was
+    /// found), once opening it has failed. `None` while it is still being
+    /// opened or when it opened successfully.
+    pub fn load_error(&self) -> Option<SharedString> {
+        self.load_error.clone()
+    }
+
     pub fn snapshot(&self) -> RepositorySnapshot {
         self.snapshot.clone()
     }
@@ -6481,9 +6490,10 @@ impl Repository {
                     cx,
                 )
                 .await
-                .map_err(|err| err.to_string())
+                .map_err(|err| format!("{err:#}"))
             })
             .shared();
+        self.load_error = None;
         self.job_sender.close_channel();
         self._worker_task = Task::ready(());
         self.active_jobs.clear();
@@ -6560,6 +6570,7 @@ impl Repository {
             initial_graph_data: Default::default(),
             commit_data: Default::default(),
             commit_data_handler: CommitDataHandlerState::Closed,
+            load_error: None,
         };
         repo.respawn_local_worker(project_environment, fs, is_trusted, cx);
         cx.subscribe_self(Self::handle_subscribe_self).detach();
@@ -6610,6 +6621,7 @@ impl Repository {
             initial_graph_data: Default::default(),
             commit_data: Default::default(),
             commit_data_handler: CommitDataHandlerState::Closed,
+            load_error: None,
         }
     }
 
@@ -10118,8 +10130,19 @@ impl Repository {
         let (job_tx, mut job_rx) = mpsc::unbounded::<GitJob>();
 
         let worker_task = cx.spawn(async move |this, cx| {
-            let Some(state) = state.await.log_err() else {
-                return;
+            let state = match state.await {
+                Ok(state) => state,
+                Err(error) => {
+                    // Jobs sent to this worker are dropped (their receivers
+                    // see `Canceled`); keep the reason so the UI can show it.
+                    log::error!("failed to open git repository: {error}");
+                    this.update(cx, |repository, cx| {
+                        repository.load_error = Some(error.into());
+                        cx.notify();
+                    })
+                    .ok();
+                    return;
+                }
             };
             if let Some(git_hosting_provider_registry) =
                 cx.update(|cx| GitHostingProviderRegistry::try_global(cx))

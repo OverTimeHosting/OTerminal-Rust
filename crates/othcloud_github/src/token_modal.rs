@@ -325,10 +325,7 @@ mod tests {
     use super::*;
 
     fn error(status: u16, code: &str) -> ApiError {
-        ApiError {
-            status,
-            code: code.to_string(),
-        }
+        ApiError::new(status, code)
     }
 
     #[test]

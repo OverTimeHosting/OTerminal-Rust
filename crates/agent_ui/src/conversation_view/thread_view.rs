@@ -563,6 +563,22 @@ impl PermissionSelection {
     }
 }
 
+/// Root folder names of the project's visible worktrees, so titles that only
+/// name the repository ("OTHSimple repo") can be recognized.
+fn project_root_names(project: &WeakEntity<Project>, cx: &App) -> Vec<String> {
+    project
+        .upgrade()
+        .map(|project| {
+            project
+                .read(cx)
+                .visible_worktrees(cx)
+                .map(|worktree| worktree.read(cx).root_name_str().to_string())
+                .filter(|name| !name.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 pub struct ThreadView {
     pub(crate) root_thread_id: ThreadId,
     pub session_id: acp::SessionId,
@@ -645,6 +661,9 @@ pub struct ThreadView {
     dismissed_skill_loading_issues: HashSet<SkillLoadingIssue>,
     pub(crate) thread_search_bar: Option<Entity<super::thread_search_bar::ThreadSearchBar>>,
     pub(crate) thread_search_visible: bool,
+    /// OTerminal: picks short task titles for this thread (see
+    /// [`crate::thread_auto_title`]).
+    pub(crate) auto_title: crate::thread_auto_title::AutoTitle,
 }
 impl Focusable for ThreadView {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
@@ -801,6 +820,10 @@ impl ThreadView {
     ) -> Self {
         let session_id = thread.read(cx).session_id().clone();
         let parent_session_id = thread.read(cx).parent_session_id().cloned();
+        let auto_title = crate::thread_auto_title::AutoTitle::new(
+            thread.read(cx).title().as_deref(),
+            &project_root_names(&project, cx),
+        );
 
         let has_slash_completions = session_capabilities.read().has_slash_completions();
         let placeholder = placeholder_text(agent_display_name.as_ref(), has_slash_completions);
@@ -1050,6 +1073,7 @@ impl ThreadView {
             dismissed_skill_loading_issues: HashSet::default(),
             thread_search_bar: None,
             thread_search_visible: false,
+            auto_title,
         };
 
         this.sync_generating_indicator(cx);
@@ -1232,6 +1256,52 @@ impl ThreadView {
 
     fn is_subagent(&self) -> bool {
         self.parent_session_id.is_some()
+    }
+
+    /// Whether the user renamed this thread, which turns auto-titling off.
+    fn has_title_override(&self, cx: &App) -> bool {
+        ThreadMetadataStore::try_global(cx).is_some_and(|store| {
+            store
+                .read(cx)
+                .entry(self.root_thread_id)
+                .is_some_and(|metadata| metadata.title_override.is_some())
+        })
+    }
+
+    /// OTerminal: a user prompt was sent; may give the thread a local title
+    /// (first real task, or a clear switch to a new task).
+    pub(crate) fn note_user_prompt_for_title(&mut self, prompt: &str, cx: &mut Context<Self>) {
+        if self.is_subagent() || self.has_title_override(cx) {
+            return;
+        }
+        let project_names = project_root_names(&self.project, cx);
+        let current = self.thread.read(cx).title();
+        if let Some(title) =
+            self.auto_title
+                .on_user_prompt(prompt, current.as_deref(), &project_names)
+        {
+            self.thread.update(cx, |thread, cx| {
+                thread.set_local_title(Some(title), cx);
+            });
+        }
+    }
+
+    /// OTerminal: the thread's title changed (usually a `session_info_update`
+    /// from Claude Code); replaces poor or stale titles.
+    pub(crate) fn reconcile_auto_title(&mut self, cx: &mut Context<Self>) {
+        if self.is_subagent() || self.has_title_override(cx) {
+            return;
+        }
+        let project_names = project_root_names(&self.project, cx);
+        let current = self.thread.read(cx).title();
+        if let crate::thread_auto_title::TitleDecision::Set(title) = self
+            .auto_title
+            .on_title_changed(current.as_deref(), &project_names)
+        {
+            self.thread.update(cx, |thread, cx| {
+                thread.set_local_title(title, cx);
+            });
+        }
     }
 
     /// Returns the currently active editor, either for a message that is being
@@ -1665,7 +1735,6 @@ impl ThreadView {
         let session_id = self.thread.read(cx).session_id().clone();
         let parent_session_id = self.thread.read(cx).parent_session_id().cloned();
         let agent_telemetry_id = self.thread.read(cx).connection().telemetry_id();
-        let is_first_message = self.thread.read(cx).entries().is_empty();
         let thread = self.thread.downgrade();
 
         self.is_loading_contents = true;
@@ -1713,7 +1782,10 @@ impl ThreadView {
                     .ok();
                 }
             });
-            if is_first_message && thread.read_with(cx, |thread, _cx| thread.title().is_none())? {
+            // OTerminal: a short local title from the prompt (upgraded when
+            // Claude Code sends its own); replaces Zed's raw-first-line
+            // provisional title.
+            {
                 let text: String = contents
                     .iter()
                     .filter_map(|block| match block {
@@ -1725,13 +1797,9 @@ impl ThreadView {
                     })
                     .collect::<Vec<_>>()
                     .join(" ");
-                let text = text.lines().next().unwrap_or("").trim();
-                if !text.is_empty() {
-                    let title: SharedString = util::truncate_and_trailoff(text, 200).into();
-                    thread.update(cx, |thread, cx| {
-                        thread.set_provisional_title(title, cx);
-                    })?;
-                }
+                this.update(cx, |this, cx| {
+                    this.note_user_prompt_for_title(&text, cx);
+                })?;
             }
 
             let turn_start_time = Instant::now();
@@ -2450,6 +2518,10 @@ impl ThreadView {
         self.thread.update(cx, |thread, cx| {
             if thread.can_set_title(cx) {
                 thread.set_title(title, cx).detach_and_log_err(cx);
+            } else {
+                // OTerminal: Claude Code can't store titles; mirror the rename
+                // locally so tabs and the header update right away.
+                thread.set_local_title(Some(title), cx);
             }
         });
     }

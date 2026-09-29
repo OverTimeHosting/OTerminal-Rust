@@ -51,6 +51,7 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
         view_items.push(MenuItem::action("Agent Panel", assistant::ToggleFocus));
     }
     view_items.push(MenuItem::action("New Claude Code Tab", agent_ui::NewClaudeTab));
+    view_items.push(MenuItem::action("Agents Dashboard", agents_dashboard::Open));
 
     view_items.extend([
         MenuItem::action("Git Panel", git_panel::ToggleFocus),

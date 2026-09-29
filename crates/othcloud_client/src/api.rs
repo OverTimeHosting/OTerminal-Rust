@@ -197,6 +197,8 @@ pub struct GithubTokenResponse {
     pub login: Option<String>,
     pub account_id: Option<String>,
     pub app_name: Option<String>,
+    /// For a git provider: its name in OTHCloud (Settings > Git).
+    pub label: Option<String>,
     pub needs_connect: bool,
     pub connect_path: Option<String>,
 }
@@ -206,12 +208,29 @@ pub struct GithubTokenResponse {
 pub struct GithubAccount {
     pub id: String,
     pub kind: GithubTokenKind,
+    /// What OTHCloud calls it: a git provider's name in Settings > Git, or a
+    /// linked GitHub account's login.
     pub label: String,
     pub login: Option<String>,
     pub github_id: Value,
     pub avatar_url: Option<String>,
     pub can_push: bool,
     pub deployable: bool,
+    /// Git providers (`app:` ids): the provider's name in OTHCloud.
+    pub provider_name: Option<String>,
+    /// GitHub App installations: the App's name.
+    pub app_name: Option<String>,
+    /// Git providers: the organization they belong to, when the user's
+    /// providers span several.
+    pub organization_name: Option<String>,
+}
+
+impl GithubAccount {
+    /// Whether this entry is a git provider from Settings > Git (as opposed
+    /// to a GitHub account linked to the OTHCloud user).
+    pub fn is_git_provider(&self) -> bool {
+        self.id.starts_with("app:")
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -228,21 +247,28 @@ pub struct PairResponse {
     pub user: User,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ApiError {
     /// The HTTP status, or 0 when the request never got a response.
     pub status: u16,
     /// The `error` field of OTHCloud's JSON error body, `network` for transport
     /// failures, or `HTTP <status>` when the body had none.
     pub code: String,
+    /// The `message` field of OTHCloud's JSON error body, when it sent one.
+    pub message: Option<String>,
 }
 
 impl ApiError {
-    pub fn network() -> Self {
+    pub fn new(status: u16, code: impl Into<String>) -> Self {
         Self {
-            status: 0,
-            code: "network".to_string(),
+            status,
+            code: code.into(),
+            message: None,
         }
+    }
+
+    pub fn network() -> Self {
+        Self::new(0, "network")
     }
 
     pub fn is_unauthorized(&self) -> bool {
@@ -254,11 +280,20 @@ impl ApiError {
     }
 
     pub fn friendly_message(&self, host: &str) -> String {
-        match self.status {
-            0 => format!("Can't reach {host}"),
-            403 => "You don't have access to this on OTHCloud.".to_string(),
-            500..=599 => "OTHCloud is having trouble right now.".to_string(),
-            _ => self.code.clone(),
+        let message = self
+            .message
+            .as_deref()
+            .map(str::trim)
+            .filter(|message| !message.is_empty());
+        match (self.status, message) {
+            (0, _) => format!("Can't reach {host}"),
+            (403, _) => "You don't have access to this on OTHCloud.".to_string(),
+            (500..=599, Some(message)) => {
+                format!("OTHCloud is having trouble right now ({message}).")
+            }
+            (500..=599, None) => "OTHCloud is having trouble right now.".to_string(),
+            (_, Some(message)) => message.to_string(),
+            (_, None) => self.code.clone(),
         }
     }
 }
@@ -353,10 +388,8 @@ impl OthcloudApi {
         &self,
         profile: NewTerminalProfile,
     ) -> Result<ServerTerminalProfile, ApiError> {
-        let body = serde_json::to_value(profile).map_err(|error| ApiError {
-            status: 0,
-            code: format!("invalid_profile: {error}"),
-        })?;
+        let body = serde_json::to_value(profile)
+            .map_err(|error| ApiError::new(0, format!("invalid_profile: {error}")))?;
         self.request(Method::POST, "/api/desktop/profiles", Some(body))
             .await
     }
@@ -527,10 +560,9 @@ async fn send_json<T: DeserializeOwned>(
         }
         None => AsyncBody::empty(),
     };
-    let request = builder.body(body).map_err(|error| ApiError {
-        status: 0,
-        code: format!("invalid_request: {error}"),
-    })?;
+    let request = builder
+        .body(body)
+        .map_err(|error| ApiError::new(0, format!("invalid_request: {error}")))?;
 
     let mut response = http.send(request).await.map_err(|error| {
         log::warn!("OTHCloud {method} {url} failed: {error:#}");
@@ -548,25 +580,14 @@ async fn send_json<T: DeserializeOwned>(
         })?;
 
     if !status.is_success() {
-        #[derive(Deserialize)]
-        struct ErrorBody {
-            #[serde(default)]
-            error: Option<String>,
-        }
-
-        let code = serde_json::from_slice::<ErrorBody>(&bytes)
-            .ok()
-            .and_then(|body| body.error)
-            .filter(|code| !code.is_empty())
-            .unwrap_or_else(|| format!("HTTP {}", status.as_u16()));
+        let error = parse_error_body(status.as_u16(), &bytes);
         log::debug!(
-            "OTHCloud {method} {url} returned {}: {code}",
-            status.as_u16()
+            "OTHCloud {method} {url} returned {}: {} {}",
+            status.as_u16(),
+            error.code,
+            error.message.as_deref().unwrap_or_default()
         );
-        return Err(ApiError {
-            status: status.as_u16(),
-            code,
-        });
+        return Err(error);
     }
 
     parse_success_body(status.as_u16(), &bytes).map_err(|error| {
@@ -574,8 +595,33 @@ async fn send_json<T: DeserializeOwned>(
         ApiError {
             status: status.as_u16(),
             code: "invalid_response".to_string(),
+            message: Some(format!("OTHCloud sent an unexpected response: {error}")),
         }
     })
+}
+
+/// An error response: `{ error, message? }` from OTHCloud, or whatever else
+/// the server (or a proxy in front of it) sent.
+fn parse_error_body(status: u16, bytes: &[u8]) -> ApiError {
+    #[derive(Deserialize)]
+    struct ErrorBody {
+        #[serde(default)]
+        error: Option<String>,
+        #[serde(default)]
+        message: Option<String>,
+    }
+
+    let body = serde_json::from_slice::<ErrorBody>(bytes).ok();
+    let (code, message) = body
+        .map(|body| (body.error, body.message))
+        .unwrap_or_default();
+    ApiError {
+        status,
+        code: code
+            .filter(|code| !code.is_empty())
+            .unwrap_or_else(|| format!("HTTP {status}")),
+        message: message.filter(|message| !message.trim().is_empty()),
+    }
 }
 
 fn parse_success_body<T: DeserializeOwned>(status: u16, bytes: &[u8]) -> serde_json::Result<T> {
@@ -670,16 +716,24 @@ mod tests {
             r#"{
                 "accounts": [
                     { "id": "user:1", "kind": "user", "label": "octocat", "login": "octocat", "githubId": "583231", "canPush": true, "deployable": true },
-                    { "id": "app:9", "kind": "installation", "label": "OTHCloud App", "githubId": "9", "canPush": true, "deployable": false }
+                    { "id": "app:9", "kind": "installation", "label": "OTHCloud App", "githubId": "9", "canPush": true, "deployable": false },
+                    { "id": "app:-O1pyAh7dhUoSKhmDZMVx", "kind": "installation", "label": "My deploy app", "providerName": "My deploy app", "appName": "othcloud-2026-04-01", "organizationName": "Acme", "githubId": "-O1pyAh7dhUoSKhmDZMVx", "canPush": false, "deployable": true }
                 ],
                 "connectPath": "/desktop-github",
                 "connectAvailable": true
             }"#,
         )
         .expect("parse");
-        assert_eq!(response.accounts.len(), 2);
+        assert_eq!(response.accounts.len(), 3);
         assert_eq!(response.accounts[0].kind, GithubTokenKind::User);
+        assert!(!response.accounts[0].is_git_provider());
         assert_eq!(response.accounts[1].kind, GithubTokenKind::Installation);
+        assert!(response.accounts[1].is_git_provider());
+        assert_eq!(response.accounts[1].provider_name, None);
+        let named = &response.accounts[2];
+        assert_eq!(named.provider_name.as_deref(), Some("My deploy app"));
+        assert_eq!(named.app_name.as_deref(), Some("othcloud-2026-04-01"));
+        assert_eq!(named.organization_name.as_deref(), Some("Acme"));
         assert!(response.connect_available);
     }
 
@@ -813,33 +867,37 @@ mod tests {
             ApiError::network().friendly_message(host),
             "Can't reach othcloud.xyz"
         );
-        let forbidden = ApiError {
-            status: 403,
-            code: "forbidden".into(),
-        };
+        let forbidden = ApiError::new(403, "forbidden");
         assert_eq!(
             forbidden.friendly_message(host),
             "You don't have access to this on OTHCloud."
         );
-        let server = ApiError {
-            status: 502,
-            code: "github_unavailable".into(),
-        };
+        let server = ApiError::new(502, "github_unavailable");
         assert_eq!(
             server.friendly_message(host),
             "OTHCloud is having trouble right now."
         );
-        let other = ApiError {
-            status: 400,
-            code: "invalid_code".into(),
-        };
-        assert_eq!(other.friendly_message(host), "invalid_code");
-        assert!(
-            ApiError {
-                status: 401,
-                code: "unauthorized".into()
-            }
-            .is_unauthorized()
+        let server_with_message = parse_error_body(
+            500,
+            br#"{ "error": "list_failed", "message": "column \"githubAccessToken\" does not exist" }"#,
         );
+        assert_eq!(server_with_message.code, "list_failed");
+        assert_eq!(
+            server_with_message.friendly_message(host),
+            "OTHCloud is having trouble right now (column \"githubAccessToken\" does not exist)."
+        );
+        let other = ApiError::new(400, "invalid_code");
+        assert_eq!(other.friendly_message(host), "invalid_code");
+        let other_with_message = parse_error_body(
+            400,
+            br#"{ "error": "missing_repo_scope", "message": "The token needs the `repo` scope." }"#,
+        );
+        assert_eq!(
+            other_with_message.friendly_message(host),
+            "The token needs the `repo` scope."
+        );
+        let html = parse_error_body(404, b"<html>Not Found</html>");
+        assert_eq!(html, ApiError::new(404, "HTTP 404"));
+        assert!(ApiError::new(401, "unauthorized").is_unauthorized());
     }
 }

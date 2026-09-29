@@ -6962,9 +6962,12 @@ impl GitPanel {
                 _ if !has_repo => {
                     this.child(Self::render_history_placeholder("No repository found"))
                 }
-                CommitHistory::Error(_) => this.child(Self::render_history_placeholder(
-                    "Failed to load commit history",
-                )),
+                CommitHistory::Error(error) => this.child(
+                    h_flex().flex_1().justify_center().px_4().child(
+                        Label::new(format!("Failed to load commit history: {error}"))
+                            .color(Color::Muted),
+                    ),
+                ),
                 CommitHistory::Loading => {
                     this.child(Self::render_history_placeholder("Loading Commit History…"))
                 }
@@ -7547,7 +7550,14 @@ impl GitPanel {
     }
 
     fn render_empty_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let load_error = self
+            .active_repository
+            .as_ref()
+            .and_then(|repository| repository.read(cx).load_error());
         let content = match (self.git_access, &self.active_repository) {
+            (_, Some(_)) if load_error.is_some() => {
+                Self::render_repository_error_ui(load_error.unwrap_or_default())
+            }
             (Some(GitAccess::No), Some(repository)) => self.render_unsafe_repo_ui(repository, cx),
             (_, None) => self.render_uninitialized_ui(cx),
             (_, Some(_)) => self.render_no_changes_ui(cx),
@@ -7578,6 +7588,41 @@ impl GitPanel {
                                 cx.dispatch_action(&DeployBranchDiff);
                             })
                         }),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// Shown when the repository could not be opened at all, e.g. because no
+    /// git executable was found. (Without this, the failed access check made
+    /// the panel claim "dubious ownership".)
+    fn render_repository_error_ui(error: SharedString) -> AnyElement {
+        let git_missing = error.contains("no git binary available");
+        let message: SharedString = if git_missing {
+            "Git was not found, so this repository can't be shown. Install Git \
+            (Git for Windows on Windows) or add it to PATH, then restart OTerminal."
+                .into()
+        } else {
+            format!("Git could not open this repository: {error}").into()
+        };
+
+        v_flex()
+            .px_4()
+            .gap_1()
+            .child(Label::new(message).color(Color::Muted))
+            .when(git_missing, |this| {
+                this.child(
+                    h_flex().child(
+                        Button::new("install_git", "Get Git")
+                            .label_size(LabelSize::Small)
+                            .style(ButtonStyle::Outlined)
+                            .end_icon(
+                                Icon::new(IconName::ArrowUpRight)
+                                    .size(IconSize::Small)
+                                    .color(Color::Muted),
+                            )
+                            .on_click(|_, _, cx| cx.open_url("https://git-scm.com/downloads")),
+                    ),
                 )
             })
             .into_any_element()

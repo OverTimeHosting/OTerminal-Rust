@@ -10,6 +10,7 @@ members = [
     "crates/agent_settings",
     "crates/agent_skills",
     "crates/agent_ui",
+    "crates/agents_dashboard",
     "crates/ai_onboarding",
     "crates/anthropic",
     "crates/askpass",
@@ -292,6 +293,7 @@ agent_servers = { path = "crates/agent_servers" }
 agent_settings = { path = "crates/agent_settings" }
 agent_skills = { path = "crates/agent_skills" }
 agent_ui = { path = "crates/agent_ui" }
+agents_dashboard = { path = "crates/agents_dashboard" }
 ai_onboarding = { path = "crates/ai_onboarding" }
 anthropic = { path = "crates/anthropic" }
 askpass = { path = "crates/askpass" }

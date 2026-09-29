@@ -1,6 +1,7 @@
 pub mod blame;
 pub mod commit;
 pub mod credential_override;
+pub mod git_binary;
 mod hosting_provider;
 mod remote;
 pub mod repository;

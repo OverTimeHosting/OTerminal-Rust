@@ -259,6 +259,14 @@ fn main() {
         return;
     }
 
+    // OTerminal: when started with a `PATH` that lacks Git (e.g. launched by
+    // another tool with a reduced environment), every repository failed to
+    // open ("no git binary available"), leaving the git panel, history and
+    // branch/worktree pickers empty. Put an installed Git on `PATH` before any
+    // thread is spawned, so repositories, `git clone` and terminals find it.
+    // SAFETY: nothing has spawned a thread yet.
+    let git_added_to_path = unsafe { git::git_binary::ensure_git_on_path() };
+
     let restart_arguments = if let Some(directory) = args.user_data_dir.as_deref() {
         let directory = paths::set_custom_data_dir(directory);
         vec![
@@ -298,6 +306,9 @@ fn main() {
         };
     }
     ztracing::init();
+    if let Some(git) = &git_added_to_path {
+        log::info!("git was not on PATH; using {git:?}");
+    }
 
     #[cfg(unix)]
     util::increase_open_file_limit().log_err();
@@ -720,6 +731,7 @@ fn main() {
             false,
             cx,
         );
+        agents_dashboard::init(cx);
         zed::watch_user_agents_md(app_state.fs.clone(), cx);
 
         repl::init(app_state.fs.clone(), cx);

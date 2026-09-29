@@ -74,7 +74,7 @@ use feature_flags::{CreateThreadToolFeatureFlag, FeatureFlagAppExt as _};
 use fs::Fs;
 use futures::FutureExt as _;
 use gpui::{
-    Action, Anchor, Animation, AnimationExt, AnyElement, App, AsyncWindowContext, ClickEvent,
+    Action, Anchor, Animation, AnimationExt, AnyElement, App, AsyncWindowContext,
     ClipboardItem, Entity, EventEmitter, ExternalPaths, FocusHandle, Focusable, KeyContext, Pixels,
     PlatformDisplay, Subscription, Task, TaskExt, WeakEntity, WindowHandle, prelude::*,
     pulsating_between,
@@ -5173,6 +5173,14 @@ impl Panel for AgentPanel {
         (self.enabled(cx) && AgentSettings::get_global(cx).button).then_some(icon)
     }
 
+    /// OTerminal: a dot while a panel thread finished or needs input unseen.
+    fn icon_label(&self, _window: &Window, cx: &App) -> Option<String> {
+        self.conversation_views()
+            .iter()
+            .any(|view| view.read(cx).has_unseen_activity())
+            .then(|| "\u{2022}".to_string())
+    }
+
     fn icon_tooltip(&self, _window: &Window, cx: &App) -> Option<&'static str> {
         if DisableAiSettings::claude_code_only(cx) {
             Some("Claude Code")
@@ -5521,9 +5529,9 @@ impl AgentPanel {
             })
     }
 
-    /// OTerminal: renders the project name and git branch, with the thread
-    /// title as the tooltip. Double-clicking renames the thread when
-    /// `renamable`.
+    /// OTerminal: renders the project name and git branch as a dropdown of
+    /// this project's threads, with the thread title as the tooltip.
+    /// "Rename Thread" is in the dropdown when `renamable`.
     fn render_project_header(
         &self,
         thread_title: SharedString,
@@ -5537,40 +5545,194 @@ impl AgentPanel {
                 .into_any_element();
         };
 
-        h_flex()
-            .id("agent-panel-project-header")
-            .flex_1()
-            .min_w_0()
-            .gap_1p5()
-            .overflow_x_hidden()
-            .child(Label::new(project_name).single_line())
-            .when_some(branch, |this, branch| {
-                this.child(
-                    h_flex()
-                        .min_w_0()
-                        .gap_0p5()
-                        .child(
-                            Icon::new(IconName::GitBranch)
-                                .size(IconSize::XSmall)
-                                .color(Color::Muted),
-                        )
-                        .child(Label::new(branch).color(Color::Muted).truncate()),
+        let has_unseen_elsewhere = self
+            .open_conversation_views(cx)
+            .iter()
+            .any(|view| view.read(cx).has_unseen_activity());
+        let trigger = ui::ButtonLike::new("agent-panel-project-header").child(
+            h_flex()
+                .min_w_0()
+                .gap_1p5()
+                .overflow_x_hidden()
+                .child(Label::new(project_name).single_line())
+                .when_some(branch, |this, branch| {
+                    this.child(
+                        h_flex()
+                            .min_w_0()
+                            .gap_0p5()
+                            .child(
+                                Icon::new(IconName::GitBranch)
+                                    .size(IconSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                            .child(Label::new(branch).color(Color::Muted).truncate()),
+                    )
+                })
+                .child(
+                    Icon::new(IconName::ChevronDown)
+                        .size(IconSize::XSmall)
+                        .color(Color::Muted),
+                )
+                .when(has_unseen_elsewhere, |this| {
+                    this.child(ui::Indicator::dot().color(Color::Success))
+                }),
+        );
+
+        let panel = cx.weak_entity();
+        let workspace = self.workspace.clone();
+        let project = self.project.clone();
+        PopoverMenu::new("agent-panel-threads-menu")
+            .trigger_with_tooltip(trigger, move |_window, cx| {
+                Tooltip::with_meta(thread_title.clone(), None, "Switch thread", cx)
+            })
+            .anchor(Anchor::TopLeft)
+            .menu(move |window, cx| {
+                Self::build_threads_menu(
+                    panel.clone(),
+                    workspace.clone(),
+                    project.clone(),
+                    renamable,
+                    window,
+                    cx,
                 )
             })
-            .tooltip(move |_window, cx| {
-                if renamable {
-                    Tooltip::with_meta(thread_title.clone(), None, "Double-click to rename", cx)
-                } else {
-                    Tooltip::simple(thread_title.clone(), cx)
+            .into_any_element()
+    }
+
+    /// OTerminal: conversations loaded in the panel or open as Claude Code
+    /// tabs of this project.
+    fn open_conversation_views(&self, cx: &App) -> Vec<Entity<ConversationView>> {
+        let mut views = self.conversation_views();
+        for view in crate::claude_tab::ClaudeTab::open_conversation_views(&self.project, cx) {
+            if !views.contains(&view) {
+                views.push(view);
+            }
+        }
+        views
+    }
+
+    /// OTerminal: the header dropdown: new thread / tab, rename, this
+    /// project's recent threads with their status, and "View All…".
+    fn build_threads_menu(
+        panel: WeakEntity<Self>,
+        workspace: WeakEntity<Workspace>,
+        project: Entity<Project>,
+        renamable: bool,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Option<Entity<ContextMenu>> {
+        const MAX_MENU_THREADS: usize = 10;
+
+        let panel_entity = panel.upgrade()?;
+        let open_views = panel_entity.read(cx).open_conversation_views(cx);
+        let current = panel_entity
+            .read(cx)
+            .active_conversation_view()
+            .map(|view| view.read(cx).thread_id);
+        let threads = crate::thread_picker::project_threads(&project, &open_views, current, cx);
+        let focus_handle = panel_entity.read(cx).focus_handle(cx);
+
+        Some(ContextMenu::build(window, cx, move |mut menu, _window, _cx| {
+            menu = menu.context(focus_handle);
+            let new_thread_panel = panel.clone();
+            menu = menu
+                .entry("New Thread", Some(NewThread.boxed_clone()), move |window, cx| {
+                    new_thread_panel
+                        .update(cx, |panel, cx| {
+                            panel.activate_new_thread(
+                                true,
+                                AgentThreadSource::AgentPanel,
+                                window,
+                                cx,
+                            );
+                        })
+                        .ok();
+                })
+                .action("New Claude Code Tab", crate::NewClaudeTab.boxed_clone());
+            if renamable {
+                let rename_panel = panel.clone();
+                menu = menu.entry("Rename Thread", None, move |window, cx| {
+                    rename_panel
+                        .update(cx, |panel, cx| panel.start_renaming_active_thread(window, cx))
+                        .ok();
+                });
+            }
+
+            if !threads.is_empty() {
+                menu = menu.separator().header("Threads");
+                for thread in threads.iter().take(MAX_MENU_THREADS) {
+                    let row = thread.clone();
+                    let target = thread.metadata.clone();
+                    let workspace = workspace.clone();
+                    menu = menu.custom_entry(
+                        move |_window, _cx| Self::render_thread_menu_row(&row),
+                        move |window, cx| {
+                            if let Some(workspace) = workspace.upgrade() {
+                                crate::thread_picker::open_thread(&workspace, &target, window, cx);
+                            }
+                        },
+                    );
                 }
-            })
-            .when(renamable, |this| {
-                this.on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
-                    if event.click_count() >= 2 {
-                        this.start_renaming_active_thread(window, cx);
-                    }
-                }))
-            })
+                let workspace = workspace.clone();
+                menu = menu.separator().entry("View All\u{2026}", None, move |window, cx| {
+                    let Some(workspace) = workspace.upgrade() else {
+                        return;
+                    };
+                    let threads = threads.clone();
+                    workspace.update(cx, |workspace, cx| {
+                        crate::thread_picker::ThreadPicker::toggle(workspace, threads, window, cx);
+                    });
+                });
+            }
+            menu
+        }))
+    }
+
+    fn render_thread_menu_row(thread: &crate::thread_picker::ProjectThread) -> AnyElement {
+        const MAX_MENU_TITLE_CHARS: usize = 40;
+        let title =
+            util::truncate_and_trailoff(&thread.metadata.display_title(), MAX_MENU_TITLE_CHARS);
+        h_flex()
+            .w_full()
+            .min_w(rems(18.))
+            .gap_2()
+            .justify_between()
+            .child(
+                h_flex()
+                    .min_w_0()
+                    .gap_1p5()
+                    .child(
+                        div()
+                            .w_3()
+                            .flex_none()
+                            .when(thread.is_current, |this| {
+                                this.child(
+                                    Icon::new(IconName::Check)
+                                        .size(IconSize::XSmall)
+                                        .color(Color::Accent),
+                                )
+                            })
+                            .when(!thread.is_current, |this| {
+                                this.children(thread.activity.indicator())
+                            }),
+                    )
+                    .child(Label::new(title).single_line()),
+            )
+            .child(
+                h_flex()
+                    .flex_none()
+                    .gap_1()
+                    .when_some(thread.activity.label(), |this, label| {
+                        this.child(Label::new(label).size(LabelSize::Small).color(Color::Muted))
+                    })
+                    .child(
+                        Label::new(crate::thread_picker::relative_time(
+                            thread.metadata.updated_at,
+                        ))
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -6489,29 +6651,54 @@ impl AgentPanel {
             });
 
         let toolbar_content = {
-            // OTerminal: in Claude Code only mode "+" starts a Claude Code
-            // thread directly instead of opening the agent menu.
+            // OTerminal: in Claude Code only mode "+" offers a new Claude Code
+            // thread in the panel or in a tab, instead of the agent menu.
             let new_claude_code_thread_button =
                 DisableAiSettings::claude_code_only(cx).then(|| {
-                    let focus_handle = focus_handle.clone();
-                    IconButton::new("new_claude_code_thread_btn", IconName::Plus)
-                        .icon_size(IconSize::Small)
-                        .tooltip(move |_window, cx| {
-                            Tooltip::for_action_in(
-                                "New Claude Code Thread",
-                                &NewThread,
-                                &focus_handle,
-                                cx,
-                            )
+                    let tooltip_focus_handle = focus_handle.clone();
+                    let menu_focus_handle = focus_handle.clone();
+                    let panel = cx.entity().downgrade();
+                    PopoverMenu::new("new_claude_code_thread_menu")
+                        .trigger_with_tooltip(
+                            IconButton::new("new_claude_code_thread_btn", IconName::Plus)
+                                .icon_size(IconSize::Small),
+                            move |_window, cx| {
+                                Tooltip::for_action_in(
+                                    "New\u{2026}",
+                                    &ToggleNewThreadMenu,
+                                    &tooltip_focus_handle,
+                                    cx,
+                                )
+                            },
+                        )
+                        .anchor(Anchor::TopRight)
+                        .with_handle(self.new_thread_menu_handle.clone())
+                        .menu(move |window, cx| {
+                            let panel = panel.clone();
+                            let focus_handle = menu_focus_handle.clone();
+                            Some(ContextMenu::build(window, cx, move |menu, _window, _cx| {
+                                menu.context(focus_handle)
+                                    .item(
+                                        ContextMenuEntry::new("New Thread")
+                                            .icon(IconName::Plus)
+                                            .icon_color(Color::Muted)
+                                            .action(NewThread.boxed_clone())
+                                            .handler(move |window, cx| {
+                                                panel
+                                                    .update(cx, |panel, cx| {
+                                                        panel.activate_new_thread(
+                                                            true,
+                                                            AgentThreadSource::AgentPanel,
+                                                            window,
+                                                            cx,
+                                                        );
+                                                    })
+                                                    .ok();
+                                            }),
+                                    )
+                                    .action("New Claude Code Tab", crate::NewClaudeTab.boxed_clone())
+                            }))
                         })
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.activate_new_thread(
-                                true,
-                                AgentThreadSource::AgentPanel,
-                                window,
-                                cx,
-                            );
-                        }))
                         .into_any_element()
                 });
             let new_thread_menu = PopoverMenu::new("new_thread_menu")

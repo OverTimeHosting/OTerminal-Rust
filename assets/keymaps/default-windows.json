@@ -636,6 +636,7 @@
       "ctrl-alt-c": "othcloud::NewClaudeCodeSession",
       "ctrl-alt-a": "agent::ToggleFocus",
       "ctrl-alt-shift-a": "agent::NewClaudeTab",
+      "ctrl-alt-shift-m": "agents_dashboard::Open",
       // Move focus between the major regions of the window (editor, open
       // panels, status bar). Accessibility navigation; mirrors VS Code's
       // "Focus Next/Previous Part". `ctrl-f6` mirrors `f6` so region navigation

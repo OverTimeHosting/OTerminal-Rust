@@ -4335,8 +4335,14 @@ fn default_render_tab_bar_buttons(
                 .anchor(Anchor::TopRight)
                 .with_handle(pane.new_item_context_menu_handle.clone())
                 .menu(move |window, cx| {
+                    // OTerminal: "New Claude Code Tab", looked up by name
+                    // since workspace can't depend on agent_ui.
+                    let new_claude_tab = cx.build_action("agent::NewClaudeTab", None).ok();
                     Some(ContextMenu::build(window, cx, |menu, _, _| {
-                        menu.action("New File", NewFile.boxed_clone())
+                        menu.when_some(new_claude_tab, |menu, action| {
+                            menu.action("New Claude Code Tab", action).separator()
+                        })
+                        .action("New File", NewFile.boxed_clone())
                             .action("Open File", ToggleFileFinder::default().boxed_clone())
                             .separator()
                             .action("Search Project", DeploySearch::default().boxed_clone())

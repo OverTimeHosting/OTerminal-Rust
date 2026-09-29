@@ -291,6 +291,20 @@ pub fn subagent_session_info_from_meta(meta: &Option<acp::Meta>) -> Option<Subag
         .and_then(|v| serde_json::from_value(v.clone()).ok())
 }
 
+/// OTerminal: the Claude Code ACP adapter stamps every report made by a
+/// sub-agent (spawned via its `Agent`/`Task` tool) with
+/// `_meta.claudeCode.parentToolUseId` = the id of the spawning tool call.
+/// Clients without native sub-agent sessions get those reports in the root
+/// session, so this is the only link from a tool call to its sub-agent.
+pub fn parent_tool_call_id_from_meta(meta: &Option<acp::Meta>) -> Option<acp::ToolCallId> {
+    meta.as_ref()
+        .and_then(|m| m.get("claudeCode"))
+        .and_then(|v| v.get("parentToolUseId"))
+        .and_then(|v| v.as_str())
+        .filter(|id| !id.is_empty())
+        .map(|id| acp::ToolCallId::new(id.to_owned()))
+}
+
 #[derive(Debug)]
 pub struct UserMessage {
     pub protocol_id: Option<acp::MessageId>,
@@ -964,9 +978,17 @@ pub struct ToolCall {
     /// sandboxing was active (see [`SANDBOX_NOT_APPLIED_META_KEY`]). `None` when
     /// the command was sandboxed normally (or sandboxing was off).
     pub sandbox_not_applied: Option<SandboxNotAppliedReason>,
+    /// OTerminal: the tool call of the sub-agent that made this call, from
+    /// [`parent_tool_call_id_from_meta`]. `None` for the main agent's calls.
+    pub parent_tool_call_id: Option<acp::ToolCallId>,
 }
 
 impl ToolCall {
+    /// The title the agent gave this tool call, if any.
+    pub fn title(&self) -> Option<&SharedString> {
+        self.title.as_ref()
+    }
+
     fn from_acp(
         tool_call: acp::ToolCall,
         status: ToolCallStatus,
@@ -1006,6 +1028,7 @@ impl ToolCall {
         let sandbox_fallback_authorization_details =
             sandbox_fallback_authorization_details_from_meta(&tool_call.meta);
         let sandbox_not_applied = sandbox_not_applied_from_meta(&tool_call.meta);
+        let parent_tool_call_id = parent_tool_call_id_from_meta(&tool_call.meta);
 
         let label = Self::new_label(
             title.as_ref(),
@@ -1032,6 +1055,7 @@ impl ToolCall {
             sandbox_authorization_details,
             sandbox_fallback_authorization_details,
             sandbox_not_applied,
+            parent_tool_call_id,
         };
         Ok(result)
     }
@@ -1119,6 +1143,9 @@ impl ToolCall {
 
         if let Some(subagent_session_info) = subagent_session_info_from_meta(&meta) {
             self.subagent_session_info = Some(subagent_session_info);
+        }
+        if self.parent_tool_call_id.is_none() {
+            self.parent_tool_call_id = parent_tool_call_id_from_meta(&meta);
         }
         if let Some(sandbox_authorization_details) = sandbox_authorization_details_from_meta(&meta)
         {
@@ -3393,6 +3420,17 @@ impl AcpThread {
         Task::ready(Ok(()))
     }
 
+    /// Sets (or clears) the thread's title locally, without propagating it to
+    /// the agent connection. Used for titles the client derives itself, and
+    /// to mirror a manual rename on agents that can't store titles.
+    pub fn set_local_title(&mut self, title: Option<SharedString>, cx: &mut Context<Self>) {
+        let had_provisional = self.provisional_title.take().is_some();
+        if self.title != title || had_provisional {
+            self.title = title;
+            cx.emit(AcpThreadEvent::TitleUpdated);
+        }
+    }
+
     /// Sets a provisional display title without propagating back to the
     /// underlying agent connection. This is used for quick preview titles
     /// (e.g. first 20 chars of the user message) that should be shown
@@ -3454,6 +3492,7 @@ impl AcpThread {
                     sandbox_authorization_details: None,
                     sandbox_fallback_authorization_details: None,
                     sandbox_not_applied: None,
+                    parent_tool_call_id: None,
                 };
                 self.push_entry(AgentThreadEntry::ToolCall(failed_tool_call), cx);
                 return Ok(());

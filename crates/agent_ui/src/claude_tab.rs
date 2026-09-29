@@ -31,7 +31,8 @@ use crate::{
 };
 
 const CLAUDE_TABS_NAMESPACE: &str = "claude_code_tabs";
-const MAX_TAB_TITLE_CHARS: usize = 24;
+const MAX_TAB_TITLE_CHARS: usize = 40;
+const FALLBACK_TAB_TITLE: &str = "Claude Code";
 
 pub fn init(cx: &mut App) {
     workspace::register_serializable_item::<ClaudeTab>(cx);
@@ -102,6 +103,23 @@ impl ClaudeTab {
             })
     }
 
+    /// Conversations open as Claude Code tabs of `project`.
+    pub(crate) fn open_conversation_views(
+        project: &Entity<Project>,
+        cx: &App,
+    ) -> Vec<Entity<ConversationView>> {
+        cx.try_global::<OpenClaudeTabs>()
+            .map(|tabs| {
+                tabs.0
+                    .iter()
+                    .filter_map(|tab| tab.upgrade())
+                    .filter(|tab| tab.read(cx).project == *project)
+                    .map(|tab| tab.read(cx).conversation_view.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub fn thread_id(&self, cx: &App) -> ThreadId {
         self.conversation_view.read(cx).thread_id
     }
@@ -121,6 +139,22 @@ impl ClaudeTab {
         let worktree = self.project.read(cx).visible_worktrees(cx).next()?;
         let name = worktree.read(cx).root_name_str().to_string();
         (!name.is_empty()).then(|| name.into())
+    }
+
+    /// The thread's title (Claude Code's, the auto title, or the user's
+    /// rename), "Claude Code" until one is known, or the loading / error
+    /// status while the session isn't connected.
+    fn full_title(&self, cx: &App) -> SharedString {
+        let view = self.conversation_view.read(cx);
+        if let Some(title) = view.thread_title(cx) {
+            return title;
+        }
+        let status = view.title(cx);
+        if status.as_ref() == crate::DEFAULT_THREAD_TITLE {
+            FALLBACK_TAB_TITLE.into()
+        } else {
+            status
+        }
     }
 
     /// Opens a new Claude Code thread in a tab in the active pane.
@@ -308,19 +342,23 @@ impl Item for ClaudeTab {
     type Event = ClaudeTabEvent;
 
     fn tab_content(&self, params: TabContentParams, _window: &Window, cx: &App) -> AnyElement {
-        Label::new(self.tab_content_text(params.detail.unwrap_or_default(), cx))
+        let label = Label::new(self.tab_content_text(params.detail.unwrap_or_default(), cx))
             .single_line()
-            .color(params.text_color())
-            .into_any_element()
+            .color(params.text_color());
+        // OTerminal: a dot while Claude finished or needs input unseen.
+        if self.conversation_view.read(cx).has_unseen_activity() {
+            h_flex()
+                .gap_1()
+                .child(label)
+                .child(ui::Indicator::dot().color(Color::Accent))
+                .into_any_element()
+        } else {
+            label.into_any_element()
+        }
     }
 
     fn tab_content_text(&self, _detail: usize, cx: &App) -> SharedString {
-        let title = self.conversation_view.read(cx).title(cx);
-        let title = util::truncate_and_trailoff(&title, MAX_TAB_TITLE_CHARS);
-        match self.project_name(cx) {
-            Some(project_name) => format!("{project_name} \u{b7} {title}").into(),
-            None => title.into(),
-        }
+        util::truncate_and_trailoff(&self.full_title(cx), MAX_TAB_TITLE_CHARS).into()
     }
 
     fn tab_icon(&self, _window: &Window, _cx: &App) -> Option<Icon> {
@@ -328,11 +366,15 @@ impl Item for ClaudeTab {
     }
 
     fn tab_tooltip_text(&self, cx: &App) -> Option<SharedString> {
-        let title = self.conversation_view.read(cx).title(cx);
+        let title = self.full_title(cx);
+        let title = match self.project_name(cx) {
+            Some(project_name) => format!("{project_name} \u{b7} {title}"),
+            None => title.to_string(),
+        };
         Some(if self.is_generating(cx) {
             format!("{title} (Claude is working\u{2026})").into()
         } else {
-            title
+            title.into()
         })
     }
 

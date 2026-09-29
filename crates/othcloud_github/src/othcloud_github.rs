@@ -149,6 +149,8 @@ pub struct ActiveGithub {
     /// The OTHCloud GitHub account id (`user:<id>` or `app:<id>`).
     pub account_id: Option<String>,
     pub app_name: Option<String>,
+    /// A git provider's name in OTHCloud (Settings > Git), when OTHCloud sent it.
+    pub label: Option<String>,
     pub kind: GithubTokenKind,
     pub source: AccountSource,
 }
@@ -161,6 +163,10 @@ impl ActiveGithub {
             login: response.login.clone(),
             account_id: response.account_id.clone(),
             app_name: response.app_name.clone(),
+            label: response
+                .label
+                .clone()
+                .filter(|label| !label.trim().is_empty()),
             kind: response.kind,
             source: AccountSource::Othcloud,
         }
@@ -173,6 +179,7 @@ impl ActiveGithub {
             login: Some(account.login.clone()),
             account_id: None,
             app_name: None,
+            label: None,
             kind: GithubTokenKind::User,
             source: AccountSource::Local {
                 github_id: account.id,
@@ -180,8 +187,13 @@ impl ActiveGithub {
         }
     }
 
-    /// A short human-readable name for this identity.
+    /// A short human-readable name for this identity: the name OTHCloud gives
+    /// it (a git provider's name in Settings > Git), else the GitHub login or
+    /// App name.
     pub fn display_name(&self) -> String {
+        if let Some(label) = &self.label {
+            return label.clone();
+        }
         match (self.kind, &self.login, &self.app_name) {
             (GithubTokenKind::User, Some(login), _) => login.clone(),
             (_, _, Some(app_name)) => app_name.clone(),
@@ -361,6 +373,20 @@ impl GithubAccountStore {
     /// `None` when git uses the user's own credential manager.
     pub fn active_label(&self, cx: &App) -> Option<String> {
         if let Some(current) = &self.current {
+            // The name OTHCloud lists it under, for servers whose token
+            // response doesn't carry it.
+            if current.source == AccountSource::Othcloud
+                && current.label.is_none()
+                && let Some(account) = current.account_id.as_deref().and_then(|id| {
+                    self.othcloud_accounts
+                        .as_ref()?
+                        .iter()
+                        .find(|account| account.id == id)
+                })
+                && !account.label.trim().is_empty()
+            {
+                return Some(account.label.clone());
+            }
             return Some(current.display_name());
         }
         match self.resolved(cx) {
@@ -503,13 +529,26 @@ impl GithubAccountStore {
                         // An older OTHCloud: only the current account is known.
                         this.othcloud_accounts = None;
                         this.othcloud_connect_available = true;
-                        this.othcloud_accounts_error = None;
+                        this.othcloud_accounts_error = Some(
+                            format!(
+                                "Couldn't load OTHCloud GitHub accounts: {host} can't list \
+                                 them yet (update OTHCloud)."
+                            )
+                            .into(),
+                        );
                     }
                     Err(error) => {
+                        log::warn!("listing OTHCloud GitHub accounts failed: {error}");
                         if error.is_unauthorized() {
                             handle_othcloud_unauthorized(cx);
                         }
-                        this.othcloud_accounts_error = Some(error.friendly_message(&host).into());
+                        this.othcloud_accounts_error = Some(
+                            format!(
+                                "Couldn't load OTHCloud GitHub accounts: {}",
+                                error.friendly_message(&host)
+                            )
+                            .into(),
+                        );
                     }
                 }
                 cx.emit(GithubAccountStoreEvent::Changed);
@@ -1323,6 +1362,16 @@ mod tests {
         });
         assert_eq!(app.display_name(), "OTHCloud App");
         assert!(!app.is_local());
+
+        // The git provider's name in OTHCloud wins over the App's name.
+        let named = ActiveGithub::from_response(&GithubTokenResponse {
+            kind: GithubTokenKind::Installation,
+            token: "ghs_x".into(),
+            app_name: Some("othcloud-2026-04-01".into()),
+            label: Some("My deploy app".into()),
+            ..Default::default()
+        });
+        assert_eq!(named.display_name(), "My deploy app");
     }
 
     fn local(id: u64, login: &str) -> LocalGithubAccount {
