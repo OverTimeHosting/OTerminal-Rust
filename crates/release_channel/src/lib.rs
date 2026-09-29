@@ -9,6 +9,9 @@ use semver::Version;
 
 const ZED_DOCS_URL: &str = "https://zed.dev/docs";
 
+/// The custom URL scheme used for OTerminal deep links (e.g. OTHCloud pairing).
+pub const URL_SCHEME: &str = "othcloud-terminal";
+
 /// stable | dev | nightly | preview
 pub static RELEASE_CHANNEL_NAME: LazyLock<String> = LazyLock::new(|| {
     if cfg!(debug_assertions) {
@@ -44,10 +47,10 @@ pub static RELEASE_CHANNEL: LazyLock<ReleaseChannel> =
 #[cfg(target_os = "windows")]
 pub fn app_identifier() -> &'static str {
     match *RELEASE_CHANNEL {
-        ReleaseChannel::Dev => "Zed-Editor-Dev",
-        ReleaseChannel::Nightly => "Zed-Editor-Nightly",
-        ReleaseChannel::Preview => "Zed-Editor-Preview",
-        ReleaseChannel::Stable => "Zed-Editor-Stable",
+        ReleaseChannel::Dev => "OTerminal-Dev",
+        ReleaseChannel::Nightly => "OTerminal-Nightly",
+        ReleaseChannel::Preview => "OTerminal-Preview",
+        ReleaseChannel::Stable => "OTerminal-Stable",
     }
 }
 
@@ -205,10 +208,10 @@ impl ReleaseChannel {
     /// Returns the display name for this [`ReleaseChannel`].
     pub fn display_name(&self) -> &'static str {
         match self {
-            ReleaseChannel::Dev => "Zed Dev",
-            ReleaseChannel::Nightly => "Zed Nightly",
-            ReleaseChannel::Preview => "Zed Preview",
-            ReleaseChannel::Stable => "Zed",
+            ReleaseChannel::Dev => "OTerminal Dev",
+            ReleaseChannel::Nightly => "OTerminal Nightly",
+            ReleaseChannel::Preview => "OTerminal Preview",
+            ReleaseChannel::Stable => "OTerminal",
         }
     }
 
@@ -227,10 +230,10 @@ impl ReleaseChannel {
     /// This also has to match the bundle identifier for Zed on macOS.
     pub fn app_id(&self) -> &'static str {
         match self {
-            ReleaseChannel::Dev => "dev.zed.Zed-Dev",
-            ReleaseChannel::Nightly => "dev.zed.Zed-Nightly",
-            ReleaseChannel::Preview => "dev.zed.Zed-Preview",
-            ReleaseChannel::Stable => "dev.zed.Zed",
+            ReleaseChannel::Dev => "com.othcloud.oterminal.dev",
+            ReleaseChannel::Nightly => "com.othcloud.oterminal.nightly",
+            ReleaseChannel::Preview => "com.othcloud.oterminal.preview",
+            ReleaseChannel::Stable => "com.othcloud.oterminal",
         }
     }
 

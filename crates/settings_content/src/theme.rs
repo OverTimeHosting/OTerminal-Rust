@@ -338,8 +338,8 @@ pub enum ThemeSelection {
     },
 }
 
-pub const DEFAULT_LIGHT_THEME: &'static str = "One Light";
-pub const DEFAULT_DARK_THEME: &'static str = "One Dark";
+pub const DEFAULT_LIGHT_THEME: &'static str = "OTHCloud Light";
+pub const DEFAULT_DARK_THEME: &'static str = "OTHCloud Dark";
 
 impl Default for ThemeSelection {
     fn default() -> Self {
@@ -1520,5 +1520,51 @@ mod tests {
             Some(FontWeightContent::NORMAL.0 as f64),
             "FontWeightContent should have default of 400.0"
         );
+    }
+
+    #[test]
+    fn test_othcloud_theme_family_parses() {
+        let family: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../assets/themes/othcloud/othcloud.json"
+        ))
+        .expect("othcloud.json must be valid JSON");
+        let themes = family["themes"].as_array().expect("themes array");
+        let names = themes
+            .iter()
+            .map(|theme| theme["name"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>();
+        assert_eq!(names, [DEFAULT_DARK_THEME, DEFAULT_LIGHT_THEME]);
+
+        for theme in themes {
+            let name = theme["name"].as_str().unwrap_or_default();
+            let style_json = theme["style"].as_object().expect("style object");
+            let style: ThemeStyleContent = serde_json::from_value(theme["style"].clone())
+                .unwrap_or_else(|err| panic!("{name}: style must deserialize: {err}"));
+            let reserialized =
+                serde_json::to_value(&style).expect("theme style must serialize again");
+
+            for (key, value) in style_json {
+                if matches!(key.as_str(), "syntax" | "players" | "accents") {
+                    continue;
+                }
+                assert!(
+                    !reserialized[key.as_str()].is_null(),
+                    "{name}: key {key:?} was not recognized or failed to parse"
+                );
+                if let Some(color) = value.as_str()
+                    && key != "background.appearance"
+                {
+                    assert!(
+                        gpui::Rgba::try_from(&ThemeColor::from(color)).is_ok(),
+                        "{name}: {key} has an invalid color {color:?}"
+                    );
+                }
+            }
+
+            assert_eq!(style.players.len(), 8, "{name}: expected 8 player colors");
+            assert!(style.syntax.contains_key("comment"), "{name}: syntax missing");
+            assert!(style.colors.terminal_ansi_dim_white.is_some());
+            assert!(style.status.warning.is_some());
+        }
     }
 }

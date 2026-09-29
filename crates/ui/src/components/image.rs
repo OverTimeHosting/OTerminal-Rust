@@ -16,6 +16,7 @@ pub enum VectorName {
     BusinessStamp,
     VipStamp,
     Grid,
+    OterminalLogo,
     ProTrialStamp,
     ProUserStamp,
     StudentStamp,

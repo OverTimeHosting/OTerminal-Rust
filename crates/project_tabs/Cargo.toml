@@ -1,0 +1,29 @@
+[package]
+name = "project_tabs"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/project_tabs.rs"
+doctest = false
+
+[features]
+default = []
+test-support = ["project/test-support", "workspace/test-support"]
+
+[dependencies]
+anyhow.workspace = true
+collections.workspace = true
+gpui.workspace = true
+language.workspace = true
+project.workspace = true
+remote_connection.workspace = true
+terminal_view.workspace = true
+ui.workspace = true
+util.workspace = true
+workspace.workspace = true

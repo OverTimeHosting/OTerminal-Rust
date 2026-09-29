@@ -137,7 +137,14 @@ impl Github {
             .header("Content-Type", "application/json")
             .follow_redirects(http_client::RedirectPolicy::FollowAll);
 
-        if let Ok(github_token) = std::env::var("GITHUB_TOKEN") {
+        // Prefer the token the app installed (OTHCloud's GitHub token, which
+        // is only valid for github.com), falling back to $GITHUB_TOKEN.
+        let app_token = if host == "github.com" {
+            git::credential_override::github_api_token()
+        } else {
+            None
+        };
+        if let Some(github_token) = app_token.or_else(|| std::env::var("GITHUB_TOKEN").ok()) {
             request = request.header("Authorization", format!("Bearer {}", github_token));
         }
 

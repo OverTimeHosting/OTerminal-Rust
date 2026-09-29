@@ -763,6 +763,11 @@ fn main() {
         });
         vim::init(cx);
         terminal_view::init(cx);
+        othcloud_client::init(cx);
+        othcloud_github::init(cx);
+        othcloud_panel::init(cx);
+        othcloud_terminal_profiles::init(cx);
+        project_tabs::init(cx);
         journal::init(app_state.clone(), cx);
         encoding_selector::init(cx);
         language_selector::init(cx);
@@ -1206,6 +1211,23 @@ fn handle_open_request(request: OpenRequest, app_state: Arc<AppState>, cx: &mut 
                         }
                     })));
                 });
+            }
+            OpenRequestKind::OthcloudAuth { code } => {
+                if let Some(account) = othcloud_client::OthcloudAccount::global(cx) {
+                    account
+                        .update(cx, |account, cx| account.complete_pairing(code, cx))
+                        .detach_and_log_err(cx);
+                } else {
+                    log::error!("OTHCloud account is not initialized; ignoring pairing link");
+                }
+                cx.spawn(async move |cx| {
+                    if workspace::activate_any_workspace_window(cx).is_some() {
+                        return anyhow::Ok(());
+                    }
+                    restore_or_create_workspace(app_state, cx).await
+                })
+                .detach_and_log_err(cx);
+                cx.activate(true);
             }
             OpenRequestKind::GitCommit { sha } => {
                 let base_open_options = zed::open_options_for_request(
@@ -1814,6 +1836,7 @@ fn parse_url_arg(arg: &str, cx: &App) -> String {
             if arg.starts_with("file://")
                 || arg.starts_with("zed://")
                 || arg.starts_with("zed-cli://")
+                || zed::is_othcloud_url(arg)
                 || arg.starts_with("ssh://")
                 || parse_zed_link(arg, cx).is_some()
             {

@@ -80,6 +80,11 @@ pub enum OpenRequestKind {
     GitCommit {
         sha: String,
     },
+    /// `othcloud-terminal://auth?code=<pairing code>` from the OTHCloud
+    /// desktop pairing page.
+    OthcloudAuth {
+        code: String,
+    },
 }
 
 impl std::fmt::Debug for OpenRequestKind {
@@ -118,6 +123,11 @@ impl std::fmt::Debug for OpenRequestKind {
                 .field("repo_url", repo_url)
                 .finish(),
             Self::GitCommit { sha } => f.debug_struct("GitCommit").field("sha", sha).finish(),
+            // Never log the pairing code itself: it is a short-lived credential.
+            Self::OthcloudAuth { code } => f
+                .debug_struct("OthcloudAuth")
+                .field("code_len", &code.len())
+                .finish(),
         }
     }
 }
@@ -155,7 +165,9 @@ impl OpenRequest {
         }
 
         for url in request.urls {
-            if let Some(server_name) = url.strip_prefix("zed-cli://") {
+            if is_othcloud_url(&url) {
+                this.parse_othcloud_url(&url)?
+            } else if let Some(server_name) = url.strip_prefix("zed-cli://") {
                 this.kind = Some(OpenRequestKind::CliConnection(connect_to_cli(server_name)?));
             } else if let Some(action_index) = url.strip_prefix("zed-dock-action://") {
                 this.kind = Some(OpenRequestKind::DockMenuAction {
@@ -260,6 +272,36 @@ impl OpenRequest {
         Ok(())
     }
 
+    fn parse_othcloud_url(&mut self, url: &str) -> Result<()> {
+        // Formats:
+        //   othcloud-terminal://auth?code=<code>   (also `:/auth` and `:auth`)
+        //   othcloud-terminal://clone?repo=<url>
+        //   othcloud-terminal://open, othcloud-terminal://
+        let rest = &url[OTHCLOUD_URL_PREFIX.len()..];
+        let rest = rest.trim_start_matches('/');
+        let rest = rest.split('#').next().unwrap_or_default();
+        let (path, query) = rest.split_once('?').unwrap_or((rest, ""));
+        let path = path.trim_end_matches('/');
+
+        match path {
+            "auth" => {
+                if let Some(code) = parse_othcloud_pairing_url(url) {
+                    self.kind = Some(OpenRequestKind::OthcloudAuth { code });
+                } else {
+                    log::warn!("othcloud-terminal auth link without a pairing code");
+                    self.kind = Some(OpenRequestKind::FocusApp);
+                }
+            }
+            "clone" => self.parse_git_clone_url(&format!("?{query}"))?,
+            "" | "open" => self.kind = Some(OpenRequestKind::FocusApp),
+            _ => {
+                log::warn!("unhandled othcloud-terminal url path: {path:?}");
+                self.kind = Some(OpenRequestKind::FocusApp);
+            }
+        }
+        Ok(())
+    }
+
     fn parse_git_commit_url(&mut self, commit_path: &str) -> Result<()> {
         // Format: <sha>?repo=<path>
         let (sha, query) = commit_path
@@ -319,6 +361,72 @@ impl OpenRequest {
         self.parse_file_path(url.path());
         Ok(())
     }
+}
+
+/// Prefix of OTerminal deep links (`release_channel::URL_SCHEME` + `:`).
+pub const OTHCLOUD_URL_PREFIX: &str = "othcloud-terminal:";
+
+/// Returns whether `url` is an `othcloud-terminal:` deep link (scheme is
+/// matched case-insensitively, as URL schemes are).
+pub fn is_othcloud_url(url: &str) -> bool {
+    url.get(..OTHCLOUD_URL_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(OTHCLOUD_URL_PREFIX))
+}
+
+/// Extracts the pairing code from `othcloud-terminal://auth?code=...`
+/// (also accepts `:/auth` and `:auth`).
+///
+/// This intentionally mirrors `othcloud_client::parse_pairing_url` so this
+/// crate does not need that dependency: it splits on `?`, `&` and `=`, decodes
+/// `%XX` escapes exactly once and keeps `+` as-is (pairing codes may contain it).
+pub fn parse_othcloud_pairing_url(url: &str) -> Option<String> {
+    if !is_othcloud_url(url) {
+        return None;
+    }
+    let rest = url[OTHCLOUD_URL_PREFIX.len()..].trim_start_matches('/');
+    let rest = rest.split('#').next().unwrap_or_default();
+    let (path, query) = rest.split_once('?')?;
+    if path.trim_end_matches('/') != "auth" {
+        return None;
+    }
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        if key != "code" {
+            return None;
+        }
+        let code = percent_decode_once(value);
+        let code = code.trim();
+        (!code.is_empty()).then(|| code.to_string())
+    })
+}
+
+/// Decodes `%XX` escapes only; every other byte (including `+`) is kept.
+fn percent_decode_once(input: &str) -> String {
+    fn hex(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+
+    let bytes = input.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(high), Some(low)) = (hex(bytes[i + 1]), hex(bytes[i + 2]))
+        {
+            decoded.push((high << 4) | low);
+            i += 3;
+        } else {
+            decoded.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
 }
 
 fn parse_ssh_url(url: &str) -> Result<url::Url> {
@@ -1631,6 +1739,110 @@ mod tests {
                 request.is_focus_app_only(),
                 "expected is_focus_app_only for {url}"
             );
+        }
+    }
+
+    #[test]
+    fn test_parse_othcloud_pairing_url() {
+        assert_eq!(
+            parse_othcloud_pairing_url("othcloud-terminal://auth?code=abc123").as_deref(),
+            Some("abc123")
+        );
+        // '+' and '/' are kept verbatim.
+        assert_eq!(
+            parse_othcloud_pairing_url("othcloud-terminal://auth?code=a+b/c==").as_deref(),
+            Some("a+b/c=="),
+            "base64-style padding after the first '=' must be kept"
+        );
+        assert_eq!(
+            parse_othcloud_pairing_url("othcloud-terminal://auth?code=a+b/c").as_deref(),
+            Some("a+b/c")
+        );
+        // %2B decodes to '+' exactly once; %252B stays "%2B".
+        assert_eq!(
+            parse_othcloud_pairing_url("othcloud-terminal://auth?code=a%2Bb%2Fc").as_deref(),
+            Some("a+b/c")
+        );
+        assert_eq!(
+            parse_othcloud_pairing_url("othcloud-terminal://auth?code=x%252B").as_deref(),
+            Some("x%2B")
+        );
+        // Alternative forms, extra params, trailing slash and scheme casing.
+        assert_eq!(
+            parse_othcloud_pairing_url("othcloud-terminal:/auth?state=1&code=zz").as_deref(),
+            Some("zz")
+        );
+        assert_eq!(
+            parse_othcloud_pairing_url("othcloud-terminal:auth?code=zz").as_deref(),
+            Some("zz")
+        );
+        assert_eq!(
+            parse_othcloud_pairing_url("OTHCloud-Terminal://auth/?code=zz").as_deref(),
+            Some("zz")
+        );
+        assert_eq!(
+            parse_othcloud_pairing_url("othcloud-terminal://auth?code=").as_deref(),
+            None
+        );
+        assert_eq!(
+            parse_othcloud_pairing_url("othcloud-terminal://open?code=zz").as_deref(),
+            None
+        );
+        assert_eq!(parse_othcloud_pairing_url("zed://auth?code=zz"), None);
+    }
+
+    #[gpui::test]
+    fn test_parse_othcloud_urls(cx: &mut TestAppContext) {
+        let _app_state = init_test(cx);
+        let parse = |url: &str, cx: &mut TestAppContext| {
+            cx.update(|cx| {
+                OpenRequest::parse(
+                    RawOpenRequest {
+                        urls: vec![url.into()],
+                        ..Default::default()
+                    },
+                    cx,
+                )
+                .unwrap()
+            })
+        };
+
+        for (url, expected) in [
+            ("othcloud-terminal://auth?code=ab+c/d", "ab+c/d"),
+            ("othcloud-terminal://auth?code=ab%2Bcd", "ab+cd"),
+        ] {
+            match parse(url, cx).kind {
+                Some(OpenRequestKind::OthcloudAuth { code }) => assert_eq!(code, expected),
+                other => panic!("expected OthcloudAuth for {url}, got {other:?}"),
+            }
+        }
+
+        for url in [
+            "othcloud-terminal://",
+            "othcloud-terminal://open",
+            "othcloud-terminal://open/",
+            "othcloud-terminal:",
+            "othcloud-terminal://something-unknown",
+            "othcloud-terminal://auth",
+        ] {
+            let request = parse(url, cx);
+            assert!(
+                request.is_focus_app_only(),
+                "expected FocusApp for {url}, got {:?}",
+                request.kind
+            );
+        }
+
+        match parse(
+            "othcloud-terminal://clone?repo=https%3A%2F%2Fgithub.com%2Fo%2Fr.git",
+            cx,
+        )
+        .kind
+        {
+            Some(OpenRequestKind::GitClone { repo_url }) => {
+                assert_eq!(repo_url.to_string(), "https://github.com/o/r.git")
+            }
+            other => panic!("expected GitClone, got {other:?}"),
         }
     }
 

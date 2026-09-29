@@ -687,6 +687,14 @@
     "context": "Workspace",
     "use_key_equivalents": true,
     "bindings": {
+      // OTerminal: project tabs, OTHCloud panel, Claude Code.
+      "cmd-alt-right": "multi_workspace::NextProject",
+      "cmd-alt-left": "multi_workspace::PreviousProject",
+      "cmd-alt-shift-right": "multi_workspace::MoveProjectDown",
+      "cmd-alt-shift-left": "multi_workspace::MoveProjectUp",
+      "cmd-alt-w": "project_tabs::CloseProjectTab",
+      "ctrl-cmd-alt-o": "othcloud_panel::ToggleFocus",
+      "cmd-alt-c": "othcloud::NewClaudeCodeSession",
       // Move focus between the major regions of the window (editor, open
       // panels, status bar). Accessibility navigation; mirrors VS Code's
       // "Focus Next/Previous Part". `cmd-f6` mirrors `f6` so region navigation

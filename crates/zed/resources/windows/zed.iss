@@ -1,11 +1,18 @@
+; OTerminal installer (based on Zed's zed.iss, GPL-3.0-or-later).
+; The Windows 11 explorer command injector (appx) is optional: when the bundle
+; script does not produce it, the classic registry context menu is used instead.
+#ifexist ResourcesDir + "\appx\zed_explorer_command_injector.appx"
+#define HasAppx
+#endif
+
 [Setup]
 AppId={#AppId}
 AppName={#AppName}
 AppVerName={#AppDisplayName}
-AppPublisher=Zed Industries
-AppPublisherURL=https://www.zed.dev/
-AppSupportURL=https://www.zed.dev/
-AppUpdatesURL=https://www.zed.dev/
+AppPublisher=OverTime Hosting
+AppPublisherURL=https://othcloud.xyz/
+AppSupportURL=https://othcloud.xyz/
+AppUpdatesURL=https://othcloud.xyz/
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 DisableReadyPage=yes
@@ -57,7 +64,7 @@ Type: filesandordirs; Name: "{app}\arm64"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 Name: "addcontextmenufiles"; Description: "{cm:AddContextMenuFiles,{#AppDisplayName}}"; GroupDescription: "{cm:Other}"
-Name: "addcontextmenufolders"; Description: "{cm:AddContextMenuFolders,{#AppDisplayName}}"; GroupDescription: "{cm:Other}"; Flags: unchecked; Check: not IsWindows11OrLater
+Name: "addcontextmenufolders"; Description: "{cm:AddContextMenuFolders,{#AppDisplayName}}"; GroupDescription: "{cm:Other}"; Flags: unchecked; Check: not UseModernContextMenu
 Name: "associatewithfiles"; Description: "{cm:AssociateWithFiles,{#AppDisplayName}}"; GroupDescription: "{cm:Other}"
 Name: "addtopath"; Description: "{cm:AddToPath}"; GroupDescription: "{cm:Other}"
 
@@ -65,10 +72,12 @@ Name: "addtopath"; Description: "{cm:AddToPath}"; GroupDescription: "{cm:Other}"
 Name: "{app}"; AfterInstall: DisableAppDirInheritance
 
 [Files]
-Source: "{#ResourcesDir}\Zed.exe"; DestDir: "{code:GetInstallDir}"; Flags: ignoreversion
+Source: "{#ResourcesDir}\{#AppExeName}.exe"; DestDir: "{code:GetInstallDir}"; Flags: ignoreversion
 Source: "{#ResourcesDir}\bin\*"; DestDir: "{code:GetInstallDir}\bin"; Flags: ignoreversion
 Source: "{#ResourcesDir}\tools\*"; DestDir: "{app}\tools"; Flags: ignoreversion
-Source: "{#ResourcesDir}\appx\*"; DestDir: "{app}\appx";  BeforeInstall: RemoveAppxPackage; AfterInstall: AddAppxPackage; Flags: ignoreversion; Check: IsWindows11OrLater
+#ifdef HasAppx
+Source: "{#ResourcesDir}\appx\*"; DestDir: "{app}\appx";  BeforeInstall: RemoveAppxPackage; AfterInstall: AddAppxPackage; Flags: ignoreversion; Check: UseModernContextMenu
+#endif
 #ifexist ResourcesDir + "\amd_ags_x64.dll"
 Source: "{#ResourcesDir}\amd_ags_x64.dll"; DestDir: "{app}"; Flags: ignoreversion
 #endif
@@ -77,6 +86,10 @@ Source: "{#ResourcesDir}\x64\OpenConsole.exe"; DestDir: "{code:GetInstallDir}\x6
 #endif
 #ifexist ResourcesDir + "\arm64\OpenConsole.exe"
 Source: "{#ResourcesDir}\arm64\OpenConsole.exe"; DestDir: "{code:GetInstallDir}\arm64"; Flags: ignoreversion
+#endif
+#ifexist ResourcesDir + "\OpenConsole.exe"
+; ConPTY's OpenConsole next to oterminal.exe (Claude Code TUI mouse/keys).
+Source: "{#ResourcesDir}\OpenConsole.exe"; DestDir: "{code:GetInstallDir}"; Flags: ignoreversion
 #endif
 Source: "{#ResourcesDir}\conpty.dll"; DestDir: "{code:GetInstallDir}"; Flags: ignoreversion
 
@@ -87,8 +100,10 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}.exe"; Tasks: de
 [Run]
 Filename: "{app}\{#AppExeName}.exe"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall; Check: WizardNotSilent
 
+#ifdef HasAppx
 [UninstallRun]
-Filename: "powershell.exe"; Parameters: "Invoke-Command -ScriptBlock {{Remove-AppxPackage -Package ""{#AppxFullName}""}"; Check: IsWindows11OrLater; Flags: shellexec waituntilterminated runhidden
+Filename: "powershell.exe"; Parameters: "Invoke-Command -ScriptBlock {{Remove-AppxPackage -Package ""{#AppxFullName}""}"; Check: UseModernContextMenu; Flags: shellexec waituntilterminated runhidden
+#endif
 
 [Registry]
 Root: HKCU; Subkey: "Software\Classes\.ascx\OpenWithProgids"; ValueType: none; ValueName: "{#RegValueName}"; Flags: deletevalue uninsdeletevalue; Tasks: associatewithfiles
@@ -1238,28 +1253,30 @@ Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExeName}.exe\DefaultIcon
 Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExeName}.exe\shell\open"; ValueType: string; ValueName: "Icon"; ValueData: """{app}\{#AppExeName}.exe"""
 Root: HKCU; Subkey: "Software\Classes\Applications\{#AppExeName}.exe\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}.exe"" ""%1"""
 
-Root: HKCU; Subkey: "Software\Classes\{#RegValueName}ContextMenu"; ValueType: expandsz; ValueName: "Title"; ValueData: "{cm:OpenWithContextMenu,{#ShellNameShort}}"; Tasks: addcontextmenufiles; Flags: uninsdeletekey; Check: IsWindows11OrLater
-Root: HKCU; Subkey: "Software\Classes\*\shell\{#RegValueName}"; ValueType: expandsz; ValueName: ""; ValueData: "{cm:OpenWithContextMenu,{#ShellNameShort}}"; Tasks: addcontextmenufiles; Flags: uninsdeletekey; Check: not IsWindows11OrLater
-Root: HKCU; Subkey: "Software\Classes\*\shell\{#RegValueName}"; ValueType: expandsz; ValueName: "Icon"; ValueData: "{app}\{#AppExeName}.exe"; Tasks: addcontextmenufiles; Check: not IsWindows11OrLater
-Root: HKCU; Subkey: "Software\Classes\*\shell\{#RegValueName}\command"; ValueType: expandsz; ValueName: ""; ValueData: """{app}\{#AppExeName}.exe"" ""%1"""; Tasks: addcontextmenufiles; Check: not IsWindows11OrLater
-Root: HKCU; Subkey: "Software\Classes\directory\shell\{#RegValueName}"; ValueType: expandsz; ValueName: ""; ValueData: "{cm:OpenWithContextMenu,{#ShellNameShort}}"; Tasks: addcontextmenufolders; Flags: uninsdeletekey; Check: IsWindows11OrLater
-Root: HKCU; Subkey: "Software\Classes\directory\shell\{#RegValueName}"; ValueType: expandsz; ValueName: "Icon"; ValueData: "{app}\{#AppExeName}.exe"; Tasks: addcontextmenufolders; Check: not IsWindows11OrLater
-Root: HKCU; Subkey: "Software\Classes\directory\shell\{#RegValueName}\command"; ValueType: expandsz; ValueName: ""; ValueData: """{app}\{#AppExeName}.exe"" ""%V"""; Tasks: addcontextmenufolders; Check: not IsWindows11OrLater
-Root: HKCU; Subkey: "Software\Classes\directory\background\shell\{#RegValueName}"; ValueType: expandsz; ValueName: ""; ValueData: "{cm:OpenWithContextMenu,{#ShellNameShort}}"; Tasks: addcontextmenufolders; Flags: uninsdeletekey; Check: not IsWindows11OrLater
-Root: HKCU; Subkey: "Software\Classes\directory\background\shell\{#RegValueName}"; ValueType: expandsz; ValueName: "Icon"; ValueData: "{app}\{#AppExeName}.exe"; Tasks: addcontextmenufolders; Check: not IsWindows11OrLater
-Root: HKCU; Subkey: "Software\Classes\directory\background\shell\{#RegValueName}\command"; ValueType: expandsz; ValueName: ""; ValueData: """{app}\{#AppExeName}.exe"" ""%V"""; Tasks: addcontextmenufolders; Check: not IsWindows11OrLater
-Root: HKCU; Subkey: "Software\Classes\Drive\shell\{#RegValueName}"; ValueType: expandsz; ValueName: ""; ValueData: "{cm:OpenWithContextMenu,{#ShellNameShort}}"; Tasks: addcontextmenufolders; Flags: uninsdeletekey; Check: not IsWindows11OrLater
-Root: HKCU; Subkey: "Software\Classes\Drive\shell\{#RegValueName}"; ValueType: expandsz; ValueName: "Icon"; ValueData: "{app}\{#AppExeName}.exe"; Tasks: addcontextmenufolders; Check: not IsWindows11OrLater
-Root: HKCU; Subkey: "Software\Classes\Drive\shell\{#RegValueName}\command"; ValueType: expandsz; ValueName: ""; ValueData: """{app}\{#AppExeName}.exe"" ""%V"""; Tasks: addcontextmenufolders; Check: not IsWindows11OrLater
+Root: HKCU; Subkey: "Software\Classes\{#RegValueName}ContextMenu"; ValueType: expandsz; ValueName: "Title"; ValueData: "{cm:OpenWithContextMenu,{#ShellNameShort}}"; Tasks: addcontextmenufiles; Flags: uninsdeletekey; Check: UseModernContextMenu
+Root: HKCU; Subkey: "Software\Classes\*\shell\{#RegValueName}"; ValueType: expandsz; ValueName: ""; ValueData: "{cm:OpenWithContextMenu,{#ShellNameShort}}"; Tasks: addcontextmenufiles; Flags: uninsdeletekey; Check: not UseModernContextMenu
+Root: HKCU; Subkey: "Software\Classes\*\shell\{#RegValueName}"; ValueType: expandsz; ValueName: "Icon"; ValueData: "{app}\{#AppExeName}.exe"; Tasks: addcontextmenufiles; Check: not UseModernContextMenu
+Root: HKCU; Subkey: "Software\Classes\*\shell\{#RegValueName}\command"; ValueType: expandsz; ValueName: ""; ValueData: """{app}\{#AppExeName}.exe"" ""%1"""; Tasks: addcontextmenufiles; Check: not UseModernContextMenu
+Root: HKCU; Subkey: "Software\Classes\directory\shell\{#RegValueName}"; ValueType: expandsz; ValueName: ""; ValueData: "{cm:OpenWithContextMenu,{#ShellNameShort}}"; Tasks: addcontextmenufolders; Flags: uninsdeletekey; Check: not UseModernContextMenu
+Root: HKCU; Subkey: "Software\Classes\directory\shell\{#RegValueName}"; ValueType: expandsz; ValueName: "Icon"; ValueData: "{app}\{#AppExeName}.exe"; Tasks: addcontextmenufolders; Check: not UseModernContextMenu
+Root: HKCU; Subkey: "Software\Classes\directory\shell\{#RegValueName}\command"; ValueType: expandsz; ValueName: ""; ValueData: """{app}\{#AppExeName}.exe"" ""%V"""; Tasks: addcontextmenufolders; Check: not UseModernContextMenu
+Root: HKCU; Subkey: "Software\Classes\directory\background\shell\{#RegValueName}"; ValueType: expandsz; ValueName: ""; ValueData: "{cm:OpenWithContextMenu,{#ShellNameShort}}"; Tasks: addcontextmenufolders; Flags: uninsdeletekey; Check: not UseModernContextMenu
+Root: HKCU; Subkey: "Software\Classes\directory\background\shell\{#RegValueName}"; ValueType: expandsz; ValueName: "Icon"; ValueData: "{app}\{#AppExeName}.exe"; Tasks: addcontextmenufolders; Check: not UseModernContextMenu
+Root: HKCU; Subkey: "Software\Classes\directory\background\shell\{#RegValueName}\command"; ValueType: expandsz; ValueName: ""; ValueData: """{app}\{#AppExeName}.exe"" ""%V"""; Tasks: addcontextmenufolders; Check: not UseModernContextMenu
+Root: HKCU; Subkey: "Software\Classes\Drive\shell\{#RegValueName}"; ValueType: expandsz; ValueName: ""; ValueData: "{cm:OpenWithContextMenu,{#ShellNameShort}}"; Tasks: addcontextmenufolders; Flags: uninsdeletekey; Check: not UseModernContextMenu
+Root: HKCU; Subkey: "Software\Classes\Drive\shell\{#RegValueName}"; ValueType: expandsz; ValueName: "Icon"; ValueData: "{app}\{#AppExeName}.exe"; Tasks: addcontextmenufolders; Check: not UseModernContextMenu
+Root: HKCU; Subkey: "Software\Classes\Drive\shell\{#RegValueName}\command"; ValueType: expandsz; ValueName: ""; ValueData: """{app}\{#AppExeName}.exe"" ""%V"""; Tasks: addcontextmenufolders; Check: not UseModernContextMenu
 
 ; Environment
 Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{code:AddToPath|{app}\bin}"; Tasks: addtopath; Check: NeedsAddToPath(ExpandConstant('{app}\bin'))
 
-; URI Scheme
-Root: HKCU; Subkey: "Software\Classes\zed"; ValueType: "string"; ValueData: "URL:zed Protocol"; Flags: uninsdeletekey
-Root: HKCU; Subkey: "Software\Classes\zed"; ValueType: "string"; ValueName: "URL Protocol"; ValueData: ""
-Root: HKCU; Subkey: "Software\Classes\zed\DefaultIcon"; ValueType: "string"; ValueData: "{app}\Zed.exe,1"
-Root: HKCU; Subkey: "Software\Classes\zed\shell\open\command"; ValueType: "string"; ValueData: """{app}\Zed.exe"" ""%1"""
+; URI Scheme: othcloud-terminal:// (OTHCloud pairing and deep links).
+; zed:// is intentionally NOT registered so a real Zed install keeps it.
+; OTerminal also re-registers this key in HKCU on every startup (portable builds).
+Root: HKCU; Subkey: "Software\Classes\othcloud-terminal"; ValueType: "string"; ValueData: "URL:OTerminal Protocol"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\othcloud-terminal"; ValueType: "string"; ValueName: "URL Protocol"; ValueData: ""
+Root: HKCU; Subkey: "Software\Classes\othcloud-terminal\DefaultIcon"; ValueType: "string"; ValueData: "{app}\{#AppExeName}.exe,0"
+Root: HKCU; Subkey: "Software\Classes\othcloud-terminal\shell\open\command"; ValueType: "string"; ValueData: """{app}\{#AppExeName}.exe"" ""%1"""
 
 [Code]
 function WizardNotSilent(): Boolean;
@@ -1270,6 +1287,17 @@ end;
 function IsWindows11OrLater(): Boolean;
 begin
   Result := (GetWindowsVersion >= $0A0055F0);
+end;
+
+// Use the Windows 11 explorer command (appx) only when it was bundled;
+// otherwise fall back to the classic registry context menu everywhere.
+function UseModernContextMenu(): Boolean;
+begin
+#ifdef HasAppx
+  Result := IsWindows11OrLater();
+#else
+  Result := False;
+#endif
 end;
 
 // https://stackoverflow.com/a/23838239/261019

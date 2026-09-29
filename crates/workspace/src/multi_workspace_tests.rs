@@ -2,7 +2,6 @@ use std::path::PathBuf;
 
 use super::*;
 use crate::item::test::TestItem;
-use agent_settings::AgentSettings;
 use client::proto;
 use fs::{FakeFs, Fs};
 use gpui::{TestAppContext, VisualTestContext};
@@ -47,78 +46,7 @@ fn setup_multi_workspace<'a>(
 }
 
 #[gpui::test]
-async fn test_sidebar_disabled_when_disable_ai_is_enabled(cx: &mut TestAppContext) {
-    init_test(cx);
-    let fs = FakeFs::new(cx.executor());
-    let project = Project::test(fs, [], cx).await;
-
-    let (multi_workspace, cx) =
-        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project, window, cx));
-
-    multi_workspace.read_with(cx, |mw, cx| {
-        assert!(mw.multi_workspace_enabled(cx));
-    });
-
-    multi_workspace.update_in(cx, |mw, _window, cx| {
-        mw.open_sidebar(cx);
-        assert!(mw.sidebar_open());
-    });
-
-    cx.update(|_window, cx| {
-        DisableAiSettings::override_global(DisableAiSettings { disable_ai: true }, cx);
-    });
-    cx.run_until_parked();
-
-    multi_workspace.read_with(cx, |mw, cx| {
-        assert!(
-            !mw.sidebar_open(),
-            "Sidebar should be closed when disable_ai is true"
-        );
-        assert!(
-            !mw.multi_workspace_enabled(cx),
-            "Multi-workspace should be disabled when disable_ai is true"
-        );
-    });
-
-    multi_workspace.update_in(cx, |mw, window, cx| {
-        mw.toggle_sidebar(window, cx);
-    });
-    multi_workspace.read_with(cx, |mw, _cx| {
-        assert!(
-            !mw.sidebar_open(),
-            "Sidebar should remain closed when toggled with disable_ai true"
-        );
-    });
-
-    cx.update(|_window, cx| {
-        DisableAiSettings::override_global(DisableAiSettings { disable_ai: false }, cx);
-    });
-    cx.run_until_parked();
-
-    multi_workspace.read_with(cx, |mw, cx| {
-        assert!(
-            mw.multi_workspace_enabled(cx),
-            "Multi-workspace should be enabled after re-enabling AI"
-        );
-        assert!(
-            !mw.sidebar_open(),
-            "Sidebar should still be closed after re-enabling AI (not auto-opened)"
-        );
-    });
-
-    multi_workspace.update_in(cx, |mw, window, cx| {
-        mw.toggle_sidebar(window, cx);
-    });
-    multi_workspace.read_with(cx, |mw, _cx| {
-        assert!(
-            mw.sidebar_open(),
-            "Sidebar should open when toggled after re-enabling AI"
-        );
-    });
-}
-
-#[gpui::test]
-async fn test_multi_workspace_collapses_when_agent_is_disabled(cx: &mut TestAppContext) {
+async fn test_multi_workspace_stays_enabled_when_disable_ai_is_enabled(cx: &mut TestAppContext) {
     init_test(cx);
     let fs = FakeFs::new(cx.executor());
     fs.insert_tree("/root_a", json!({ "file.txt": "" })).await;
@@ -128,29 +56,126 @@ async fn test_multi_workspace_collapses_when_agent_is_disabled(cx: &mut TestAppC
 
     let (multi_workspace, cx) =
         cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
-
-    multi_workspace.update_in(cx, |multi_workspace, window, cx| {
-        multi_workspace.test_add_workspace(project_b, window, cx);
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_b, window, cx);
     });
     cx.run_until_parked();
-
-    multi_workspace.read_with(cx, |multi_workspace, cx| {
-        assert!(multi_workspace.multi_workspace_enabled(cx));
-        assert_eq!(multi_workspace.workspaces().count(), 2);
-    });
 
     cx.update(|_window, cx| {
-        let mut settings = AgentSettings::get_global(cx).clone();
-        settings.enabled = false;
-        AgentSettings::override_global(settings, cx);
+        DisableAiSettings::override_global(DisableAiSettings { disable_ai: true }, cx);
     });
     cx.run_until_parked();
 
-    multi_workspace.read_with(cx, |multi_workspace, cx| {
-        assert!(!multi_workspace.multi_workspace_enabled(cx));
-        assert!(!multi_workspace.sidebar_open());
-        assert_eq!(multi_workspace.workspaces().count(), 1);
-        assert!(multi_workspace.project_group_keys().is_empty());
+    multi_workspace.read_with(cx, |mw, cx| {
+        assert!(
+            mw.multi_workspace_enabled(cx),
+            "project tabs must not depend on the AI settings"
+        );
+        assert_eq!(
+            mw.workspaces().count(),
+            2,
+            "disabling AI must not close hidden project tabs"
+        );
+        assert_eq!(mw.project_group_keys().len(), 2);
+    });
+
+    // Without a registered sidebar, the sidebar actions are no-ops.
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        assert!(!mw.has_sidebar());
+        mw.toggle_sidebar(window, cx);
+        assert!(!mw.sidebar_open());
+    });
+}
+
+#[gpui::test]
+async fn test_switching_projects_keeps_hidden_workspace_alive(cx: &mut TestAppContext) {
+    init_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file_a.txt": "" })).await;
+    fs.insert_tree("/root_b", json!({ "file_b.txt": "" })).await;
+    let project_a = Project::test(fs.clone(), ["/root_a".as_ref()], cx).await;
+    let project_b = Project::test(fs, ["/root_b".as_ref()], cx).await;
+    let key_a = project_a.read_with(cx, |project, cx| project.project_group_key(cx));
+    let key_b = project_b.read_with(cx, |project, cx| project.project_group_key(cx));
+
+    let (multi_workspace, cx) =
+        cx.add_window_view(|window, cx| MultiWorkspace::test_new(project_a, window, cx));
+    let workspace_a = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+    let weak_workspace_a = workspace_a.downgrade();
+
+    // Give the first project an unsaved item so we can check it survives.
+    let dirty_item = cx.new(|cx| TestItem::new(cx).with_dirty(true));
+    workspace_a.update_in(cx, |workspace, window, cx| {
+        workspace.add_item_to_active_pane(Box::new(dirty_item.clone()), None, true, window, cx);
+    });
+    drop(workspace_a);
+
+    let workspace_b = multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.test_add_workspace(project_b, window, cx)
+    });
+    cx.run_until_parked();
+
+    multi_workspace.read_with(cx, |mw, cx| {
+        assert_eq!(mw.workspace().entity_id(), workspace_b.entity_id());
+        assert_eq!(mw.workspaces().count(), 2);
+        let workspace_a = weak_workspace_a
+            .upgrade()
+            .expect("the hidden workspace must not be released");
+        assert!(mw.is_workspace_retained(&workspace_a));
+        assert!(
+            workspace_a
+                .read(cx)
+                .items(cx)
+                .any(|item| item.item_id() == dirty_item.entity_id() && item.is_dirty(cx)),
+            "the hidden workspace keeps its unsaved item"
+        );
+    });
+
+    // Switching back through the project tab shows the very same workspace.
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        assert!(mw.activate_project_group(&key_a, window, cx));
+    });
+    cx.run_until_parked();
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert_eq!(
+            Some(mw.workspace().entity_id()),
+            weak_workspace_a.upgrade().map(|ws| ws.entity_id())
+        );
+        assert_eq!(mw.workspaces().count(), 2);
+    });
+
+    // Cycling wraps around the tabs without creating new workspaces.
+    cx.dispatch_action(NextProject);
+    cx.run_until_parked();
+    multi_workspace.read_with(cx, |mw, cx| {
+        assert_ne!(
+            mw.project_group_key_for_workspace(mw.workspace(), cx),
+            key_a
+        );
+        assert_eq!(mw.workspaces().count(), 2);
+    });
+    cx.dispatch_action(PreviousProject);
+    cx.run_until_parked();
+    multi_workspace.read_with(cx, |mw, cx| {
+        assert_eq!(
+            mw.project_group_key_for_workspace(mw.workspace(), cx),
+            key_a
+        );
+    });
+
+    // Dragging a tab reorders the project groups.
+    multi_workspace.update(cx, |mw, cx| {
+        let keys = mw.project_group_keys();
+        let first = keys[0].clone();
+        assert!(mw.move_project_group_to(&first, 1, cx));
+        assert_eq!(
+            mw.project_group_keys(),
+            vec![keys[1].clone(), keys[0].clone()]
+        );
+        assert!(!mw.move_project_group_to(&first, 5, cx));
+    });
+    multi_workspace.read_with(cx, |mw, _cx| {
+        assert!(mw.project_group_keys().contains(&key_b));
     });
 }
 

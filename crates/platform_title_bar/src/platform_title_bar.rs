@@ -6,8 +6,6 @@ use gpui::{
     MouseButton, ParentElement, StatefulInteractiveElement, Styled, WeakEntity, Window,
     WindowButtonLayout, WindowControlArea, div, px,
 };
-use project::DisableAiSettings;
-use settings::Settings;
 use smallvec::SmallVec;
 use std::mem;
 use ui::{
@@ -109,8 +107,9 @@ impl PlatformTitleBar {
             .unwrap_or_default()
     }
 
-    pub fn is_multi_workspace_enabled(cx: &App) -> bool {
-        !DisableAiSettings::get_global(cx).disable_ai
+    /// OTerminal always runs with project tabs (multi-workspace) enabled.
+    pub fn is_multi_workspace_enabled(_cx: &App) -> bool {
+        true
     }
 }
 
@@ -294,6 +293,8 @@ impl Render for PlatformTitleBar {
                     .justify_between()
                     .overflow_x_hidden()
                     .w_full()
+                    // Full height so OTerminal's project tabs span the title bar.
+                    .h_full()
                     .children(children),
             )
             .when(

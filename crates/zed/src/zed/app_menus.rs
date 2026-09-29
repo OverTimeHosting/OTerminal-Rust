@@ -1,4 +1,3 @@
-use collab_ui::collab_panel;
 use gpui::{App, Menu, MenuItem, OsAction};
 use project::DisableAiSettings;
 use release_channel::ReleaseChannel;
@@ -42,7 +41,6 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
         MenuItem::separator(),
         MenuItem::action("Project Panel", project_panel::ToggleFocus),
         MenuItem::action("Outline Panel", outline_panel::ToggleFocus),
-        MenuItem::action("Collab Panel", collab_panel::ToggleFocus),
         MenuItem::action("Terminal Panel", terminal_panel::Toggle),
         MenuItem::action("Debugger Panel", debug_panel::ToggleFocus),
     ];
@@ -68,11 +66,10 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
 
     vec![
         Menu {
-            name: "Zed".into(),
+            name: "OTerminal".into(),
             disabled: false,
             items: vec![
-                MenuItem::action("About Zed", zed_actions::About),
-                MenuItem::action("Check for Updates", auto_update::Check),
+                MenuItem::action("About OTerminal", zed_actions::About),
                 MenuItem::separator(),
                 MenuItem::submenu(Menu::new("Settings").items([
                     MenuItem::action("Open Settings", zed_actions::OpenSettings),
@@ -103,13 +100,13 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
                 MenuItem::action("Install CLI", install_cli::InstallCliBinary),
                 MenuItem::separator(),
                 #[cfg(target_os = "macos")]
-                MenuItem::action("Hide Zed", super::Hide),
+                MenuItem::action("Hide OTerminal", super::Hide),
                 #[cfg(target_os = "macos")]
                 MenuItem::action("Hide Others", super::HideOthers),
                 #[cfg(target_os = "macos")]
                 MenuItem::action("Show All", super::ShowAll),
                 MenuItem::separator(),
-                MenuItem::action("Quit Zed", Quit),
+                MenuItem::action("Quit OTerminal", Quit),
             ],
         },
         Menu {
@@ -304,35 +301,25 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
             name: "Help".into(),
             disabled: false,
             items: vec![
-                MenuItem::action(
-                    "View Release Notes Locally",
-                    auto_update_ui::ViewReleaseNotesLocally,
-                ),
-                MenuItem::action("View Telemetry", zed_actions::OpenTelemetryLog),
-                MenuItem::action("View Dependency Licenses", zed_actions::OpenLicenses),
                 MenuItem::action("Show Welcome", onboarding::ShowWelcome),
-                MenuItem::separator(),
-                MenuItem::action("File Bug Report...", zed_actions::feedback::FileBugReport),
-                MenuItem::action("Request Feature...", zed_actions::feedback::RequestFeature),
-                MenuItem::action("Email Us...", zed_actions::feedback::EmailZed),
+                MenuItem::action("View Dependency Licenses", zed_actions::OpenLicenses),
                 MenuItem::separator(),
                 MenuItem::action(
-                    "Documentation",
+                    "OTHCloud Website",
                     super::OpenBrowser {
-                        url: "https://zed.dev/docs".into(),
-                    },
-                ),
-                MenuItem::action("Zed Repository", feedback::OpenZedRepo),
-                MenuItem::action(
-                    "Zed Twitter",
-                    super::OpenBrowser {
-                        url: "https://twitter.com/zeddotdev".into(),
+                        url: "https://othcloud.xyz".into(),
                     },
                 ),
                 MenuItem::action(
-                    "Join the Team",
+                    "OTHCloud Dashboard",
                     super::OpenBrowser {
-                        url: "https://zed.dev/jobs".into(),
+                        url: "https://othcloud.xyz/dashboard".into(),
+                    },
+                ),
+                MenuItem::action(
+                    "Pair OTerminal with OTHCloud",
+                    super::OpenBrowser {
+                        url: "https://othcloud.xyz/desktop-pair".into(),
                     },
                 ),
             ],

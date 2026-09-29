@@ -6,8 +6,8 @@ use gpui::{
     ManagedView, MouseButton, Pixels, Render, Subscription, Task, TaskExt, WeakEntity, Window,
     WindowId, actions, deferred, px,
 };
+use project::Project;
 pub use project::ProjectGroupKey;
-use project::{DisableAiSettings, Project};
 use remote::RemoteConnectionOptions;
 use settings::Settings;
 pub use settings::SidebarSide;
@@ -333,7 +333,7 @@ impl MultiWorkspace {
 
     pub fn sidebar_render_state(&self, cx: &App) -> SidebarRenderState {
         SidebarRenderState {
-            open: self.sidebar_open() && self.multi_workspace_enabled(cx),
+            open: self.sidebar_open() && self.sidebar.is_some() && self.multi_workspace_enabled(cx),
             side: self.sidebar_side(cx),
         }
     }
@@ -347,18 +347,9 @@ impl MultiWorkspace {
                 task.detach();
             }
         });
-        let settings_subscription = cx.observe_global_in::<settings::SettingsStore>(window, {
-            let mut previous_multi_workspace_enabled = !DisableAiSettings::get_global(cx)
-                .disable_ai
-                && AgentSettings::get_global(cx).enabled;
-            move |this, window, cx| {
-                let multi_workspace_enabled = this.multi_workspace_enabled(cx);
-                if previous_multi_workspace_enabled && !multi_workspace_enabled {
-                    this.collapse_to_single_workspace(window, cx);
-                }
-                previous_multi_workspace_enabled = multi_workspace_enabled;
-            }
-        });
+        // OTerminal: project tabs keep every workspace of a window alive, so
+        // unlike upstream Zed there is no settings observer here that collapses
+        // the window back to a single workspace when AI features are disabled.
         Self::subscribe_to_workspace(&workspace, window, cx);
         let weak_self = cx.weak_entity();
         let active_workspace_id = Rc::new(Cell::new(workspace.entity_id()));
@@ -379,7 +370,7 @@ impl MultiWorkspace {
             sidebar_overlay: None,
             pending_removal_tasks: Vec::new(),
             _serialize_task: None,
-            _subscriptions: vec![release_subscription, settings_subscription],
+            _subscriptions: vec![release_subscription],
             previous_focus_handle: None,
         }
     }
@@ -423,12 +414,24 @@ impl MultiWorkspace {
             .map_or(false, |s| s.is_threads_list_view_active(cx))
     }
 
-    pub fn multi_workspace_enabled(&self, cx: &App) -> bool {
-        !DisableAiSettings::get_global(cx).disable_ai && AgentSettings::get_global(cx).enabled
+    /// Whether this window holds several workspaces (OTerminal project tabs).
+    ///
+    /// Upstream Zed ties this to the AI settings. OTerminal always enables it:
+    /// every project opened in a window becomes a tab whose workspace stays
+    /// alive (terminals, unsaved buffers, layout, scroll) while another tab
+    /// is shown.
+    pub fn multi_workspace_enabled(&self, _cx: &App) -> bool {
+        true
+    }
+
+    /// Whether a workspace sidebar (the agent threads sidebar) is registered.
+    /// OTerminal does not register one, so the sidebar actions are no-ops.
+    pub fn has_sidebar(&self) -> bool {
+        self.sidebar.is_some()
     }
 
     pub fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.multi_workspace_enabled(cx) {
+        if !self.multi_workspace_enabled(cx) || self.sidebar.is_none() {
             return;
         }
 
@@ -455,7 +458,7 @@ impl MultiWorkspace {
     }
 
     pub fn focus_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.multi_workspace_enabled(cx) {
+        if !self.multi_workspace_enabled(cx) || self.sidebar.is_none() {
             return;
         }
 
@@ -929,6 +932,108 @@ impl MultiWorkspace {
         true
     }
 
+    /// Moves the project group identified by `key` to `index` (clamped to the
+    /// valid range), e.g. when a project tab is dragged to a new position.
+    pub fn move_project_group_to(
+        &mut self,
+        key: &ProjectGroupKey,
+        index: usize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(current) = self
+            .project_groups
+            .iter()
+            .position(|group| group.key == *key)
+        else {
+            return false;
+        };
+        let target = index.min(self.project_groups.len().saturating_sub(1));
+        if current == target {
+            return false;
+        }
+        let group = self.project_groups.remove(current);
+        self.project_groups.insert(target, group);
+        cx.emit(MultiWorkspaceEvent::ProjectGroupsChanged);
+        self.serialize(cx);
+        cx.notify();
+        true
+    }
+
+    /// Shows the project group identified by `key`.
+    ///
+    /// If one of its workspaces is already held by this window, it is shown
+    /// exactly as it was left: hidden workspaces stay alive, so their running
+    /// terminals, unsaved buffers, layout and scroll positions are intact.
+    /// Otherwise a local workspace is created for the group's paths, restoring
+    /// its serialized state from the workspace database.
+    ///
+    /// Returns `false` when the group could not be shown, which only happens
+    /// for a remote group whose workspace is not loaded (connecting needs UI
+    /// that lives outside this crate; see `find_or_create_workspace`).
+    pub fn activate_project_group(
+        &mut self,
+        key: &ProjectGroupKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if let Some(workspace) = self.last_active_workspace_for_group(key, cx).or_else(|| {
+            self.workspaces_for_project_group(key, cx)
+                .into_iter()
+                .next()
+        }) {
+            self.activate(workspace, None, window, cx);
+            return true;
+        }
+
+        if key.host().is_some() || key.path_list().paths().is_empty() {
+            return false;
+        }
+
+        self.find_or_create_local_workspace(
+            key.path_list().clone(),
+            Some(key.clone()),
+            None,
+            OpenMode::Activate,
+            None,
+            window,
+            cx,
+        )
+        .detach_and_log_err(cx);
+        true
+    }
+
+    /// Activates the next (or previous) project group, wrapping around.
+    /// Remote groups whose workspace is not loaded are skipped.
+    pub fn cycle_project_group(
+        &mut self,
+        forward: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let groups = self.project_group_keys();
+        let count = groups.len();
+        if count == 0 {
+            return;
+        }
+        let active_key = self.project_group_key_for_workspace(self.workspace(), cx);
+        let start = groups.iter().position(|key| *key == active_key);
+        for step in 1..=count {
+            let index = match start {
+                Some(start) if forward => (start + step) % count,
+                Some(start) => (start + count * 2 - step) % count,
+                None if forward => step - 1,
+                None => count - step,
+            };
+            let key = &groups[index];
+            if *key == active_key {
+                return;
+            }
+            if self.activate_project_group(key, window, cx) {
+                return;
+            }
+        }
+    }
+
     pub fn workspaces_for_project_group(
         &self,
         key: &ProjectGroupKey,
@@ -1376,27 +1481,6 @@ impl MultiWorkspace {
         let key = self.held[index].workspace.read(cx).project_group_key(cx);
         self.pin(index, key, cx);
         self.serialize(cx);
-        cx.notify();
-    }
-
-    /// Collapses to a single workspace, discarding all groups.
-    /// Used when multi-workspace is disabled by settings.
-    fn collapse_to_single_workspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.sidebar_open {
-            self.close_sidebar(window, cx);
-        }
-
-        let displayed_workspace = self.workspace().clone();
-        for workspace in self.workspaces().cloned().collect::<Vec<_>>() {
-            if workspace != displayed_workspace {
-                self.detach_workspace(&workspace, cx);
-            }
-        }
-
-        for held in &mut self.held {
-            held.pinned = false;
-        }
-        self.project_groups.clear();
         cx.notify();
     }
 
@@ -2079,76 +2163,76 @@ impl Render for MultiWorkspace {
                 .font(ui_font)
                 .text_color(text_color)
                 .on_action(cx.listener(Self::close_window))
-                .when(self.multi_workspace_enabled(cx), |this| {
-                    this.on_action(cx.listener(
-                        |this: &mut Self, _: &ToggleWorkspaceSidebar, window, cx| {
-                            this.toggle_sidebar(window, cx);
-                        },
-                    ))
-                    .on_action(cx.listener(
-                        |this: &mut Self, _: &CloseWorkspaceSidebar, window, cx| {
-                            this.close_sidebar_action(window, cx);
-                        },
-                    ))
-                    .on_action(cx.listener(
-                        |this: &mut Self, _: &FocusWorkspaceSidebar, window, cx| {
-                            this.focus_sidebar(window, cx);
-                        },
-                    ))
-                    .on_action(cx.listener(
-                        |this: &mut Self, action: &ToggleThreadSwitcher, window, cx| {
-                            if let Some(sidebar) = &this.sidebar {
-                                sidebar.toggle_thread_switcher(action.select_last, window, cx);
-                            }
-                        },
-                    ))
-                    .on_action(cx.listener(|this: &mut Self, _: &NextProject, window, cx| {
-                        if let Some(sidebar) = &this.sidebar {
-                            sidebar.cycle_project(true, window, cx);
-                        }
-                    }))
-                    .on_action(
-                        cx.listener(|this: &mut Self, _: &PreviousProject, window, cx| {
-                            if let Some(sidebar) = &this.sidebar {
-                                sidebar.cycle_project(false, window, cx);
-                            }
-                        }),
-                    )
-                    .on_action(
-                        cx.listener(|this: &mut Self, _: &MoveProjectUp, _window, cx| {
+                // Project navigation drives OTerminal's project tabs and works
+                // whether or not a sidebar is registered.
+                .on_action(cx.listener(|this: &mut Self, _: &NextProject, window, cx| {
+                    this.cycle_project_group(true, window, cx);
+                }))
+                .on_action(
+                    cx.listener(|this: &mut Self, _: &PreviousProject, window, cx| {
+                        this.cycle_project_group(false, window, cx);
+                    }),
+                )
+                .on_action(
+                    cx.listener(|this: &mut Self, _: &MoveProjectUp, _window, cx| {
+                        let key = this.project_group_key_for_workspace(this.workspace(), cx);
+                        this.move_project_group_up(&key, cx);
+                    }),
+                )
+                .on_action(
+                    cx.listener(|this: &mut Self, _: &MoveProjectDown, _window, cx| {
+                        let key = this.project_group_key_for_workspace(this.workspace(), cx);
+                        this.move_project_group_down(&key, cx);
+                    }),
+                )
+                .when(self.project_group_keys().len() >= 2, |el| {
+                    el.on_action(cx.listener(
+                        |this: &mut Self, _: &MoveProjectToNewWindow, window, cx| {
                             let key = this.project_group_key_for_workspace(this.workspace(), cx);
-                            this.move_project_group_up(&key, cx);
-                        }),
-                    )
-                    .on_action(
-                        cx.listener(|this: &mut Self, _: &MoveProjectDown, _window, cx| {
-                            let key = this.project_group_key_for_workspace(this.workspace(), cx);
-                            this.move_project_group_down(&key, cx);
-                        }),
-                    )
-                    .on_action(cx.listener(|this: &mut Self, _: &NextThread, window, cx| {
-                        if let Some(sidebar) = &this.sidebar {
-                            sidebar.cycle_thread(true, window, cx);
-                        }
-                    }))
-                    .on_action(
-                        cx.listener(|this: &mut Self, _: &PreviousThread, window, cx| {
-                            if let Some(sidebar) = &this.sidebar {
-                                sidebar.cycle_thread(false, window, cx);
-                            }
-                        }),
-                    )
-                    .when(self.project_group_keys().len() >= 2, |el| {
-                        el.on_action(cx.listener(
-                            |this: &mut Self, _: &MoveProjectToNewWindow, window, cx| {
-                                let key =
-                                    this.project_group_key_for_workspace(this.workspace(), cx);
-                                this.open_project_group_in_new_window(&key, window, cx)
-                                    .detach_and_log_err(cx);
+                            this.open_project_group_in_new_window(&key, window, cx)
+                                .detach_and_log_err(cx);
+                        },
+                    ))
+                })
+                .when(
+                    self.multi_workspace_enabled(cx) && self.sidebar.is_some(),
+                    |this| {
+                        this.on_action(cx.listener(
+                            |this: &mut Self, _: &ToggleWorkspaceSidebar, window, cx| {
+                                this.toggle_sidebar(window, cx);
                             },
                         ))
-                    })
-                })
+                        .on_action(cx.listener(
+                            |this: &mut Self, _: &CloseWorkspaceSidebar, window, cx| {
+                                this.close_sidebar_action(window, cx);
+                            },
+                        ))
+                        .on_action(cx.listener(
+                            |this: &mut Self, _: &FocusWorkspaceSidebar, window, cx| {
+                                this.focus_sidebar(window, cx);
+                            },
+                        ))
+                        .on_action(cx.listener(
+                            |this: &mut Self, action: &ToggleThreadSwitcher, window, cx| {
+                                if let Some(sidebar) = &this.sidebar {
+                                    sidebar.toggle_thread_switcher(action.select_last, window, cx);
+                                }
+                            },
+                        ))
+                        .on_action(cx.listener(|this: &mut Self, _: &NextThread, window, cx| {
+                            if let Some(sidebar) = &this.sidebar {
+                                sidebar.cycle_thread(true, window, cx);
+                            }
+                        }))
+                        .on_action(cx.listener(
+                            |this: &mut Self, _: &PreviousThread, window, cx| {
+                                if let Some(sidebar) = &this.sidebar {
+                                    sidebar.cycle_thread(false, window, cx);
+                                }
+                            },
+                        ))
+                    },
+                )
                 .when(
                     self.sidebar_open() && self.multi_workspace_enabled(cx),
                     |this| {

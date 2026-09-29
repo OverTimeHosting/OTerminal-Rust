@@ -1273,8 +1273,14 @@ impl Fs for RealFs {
         };
 
         let job_tracker = JobTracker::new(job_info, self.job_event_subscribers.clone());
+        // Credentials injected by the application (e.g. OTHCloud's GitHub
+        // token). `git_credential_env` numbers its GIT_CONFIG_* entries after
+        // any GIT_CONFIG_COUNT this process inherited, and already includes
+        // GIT_TERMINAL_PROMPT=0 when an override is active.
+        let credential_env = git::credential_override::git_credential_env();
         let mut child = new_command("git")
             .current_dir(abs_work_directory)
+            .envs(credential_env)
             .args(["clone", "--progress", repo_url])
             .stdout(Stdio::null())
             .stderr(Stdio::piped())

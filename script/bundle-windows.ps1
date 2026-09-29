@@ -3,8 +3,15 @@ Param(
     [Parameter()][Alias('i')][switch]$Install,
     [Parameter()][Alias('h')][switch]$Help,
     [Parameter()][Alias('a')][string]$Architecture,
-    [Parameter()][string]$Name
+    [Parameter()][string]$Name,
+    # Also build the (optional) remote_server zip. Off by default to keep builds light.
+    [Parameter()][switch]$RemoteServer
 )
+
+# OTerminal Windows bundle script (based on Zed's bundle-windows.ps1).
+# Produces target\OTerminal-<arch>.exe (Inno Setup installer) containing:
+#   oterminal.exe, conpty.dll, OpenConsole.exe (next to the exe and in x64\ / arm64\),
+#   bin\oterminal.exe (CLI), bin\oterminal (WSL shim), tools\auto_update_helper.exe
 
 . "$PSScriptRoot/lib/workspace.ps1"
 
@@ -29,6 +36,10 @@ $Architecture = if ($Architecture) {
 
 $CargoOutDir = "./target/$Architecture-pc-windows-msvc/release"
 
+# Keep in sync with the ConPTY version downloaded by crates/zed/build.rs.
+$ConptyVersionTag = "v1.24.10621.0"
+$ConptyPackage = "Microsoft.Windows.Console.ConPTY.1.24.260303001.nupkg"
+
 function Get-VSArch {
     param(
         [string]$Arch
@@ -40,24 +51,30 @@ function Get-VSArch {
     }
 }
 
-Push-Location
-& "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\Launch-VsDevShell.ps1" -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
-Pop-Location
-
-$target = "$Architecture-pc-windows-msvc"
-
 if ($Help) {
-    Write-Output "Usage: test.ps1 [-Install] [-Help]"
-    Write-Output "Build the installer for Windows.\n"
+    Write-Output "Usage: bundle-windows.ps1 [-Install] [-RemoteServer] [-Help]"
+    Write-Output "Build the OTerminal installer for Windows.`n"
     Write-Output "Options:"
     Write-Output "  -Architecture, -a Which architecture to build (x86_64 or aarch64)"
     Write-Output "  -Install, -i      Run the installer after building."
+    Write-Output "  -RemoteServer     Also build and zip remote_server."
     Write-Output "  -Help, -h         Show this help message."
     exit 0
 }
 
+$vsDevShell = Get-ChildItem -Path "C:\Program Files\Microsoft Visual Studio\*\*\Common7\Tools\Launch-VsDevShell.ps1", "C:\Program Files (x86)\Microsoft Visual Studio\*\*\Common7\Tools\Launch-VsDevShell.ps1" -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($vsDevShell) {
+    Push-Location
+    & $vsDevShell.FullName -Arch (Get-VSArch -Arch $Architecture) -HostArch (Get-VSArch -Arch $OSArchitecture)
+    Pop-Location
+} else {
+    Write-Output "Visual Studio developer shell not found; assuming the MSVC toolchain is already on PATH."
+}
+
+$target = "$Architecture-pc-windows-msvc"
+
 Push-Location -Path crates/zed
-$channel = Get-Content "RELEASE_CHANNEL"
+$channel = (Get-Content "RELEASE_CHANNEL").Trim()
 $env:ZED_RELEASE_CHANNEL = $channel
 $env:RELEASE_CHANNEL = $channel
 Pop-Location
@@ -76,8 +93,7 @@ function CheckEnvironmentVariables {
         }
     }
 
-    # On PRs from forks the signing secrets are not populated,
-    # so skip code signing instead of failing, like bundle-mac does.
+    # When the signing secrets are not populated, skip code signing instead of failing.
     $signingVars = @(
         'AZURE_TENANT_ID', 'AZURE_CLIENT_ID', 'AZURE_CLIENT_SECRET',
         'ACCOUNT_NAME', 'CERT_PROFILE_NAME', 'ENDPOINT',
@@ -101,7 +117,8 @@ function PrepareForBundle {
     }
     New-Item -Path "$innoDir" -ItemType Directory -Force
     Copy-Item -Path "$env:ZED_WORKSPACE\crates\zed\resources\windows\*" -Destination "$innoDir" -Recurse -Force
-    New-Item -Path "$innoDir\make_appx" -ItemType Directory -Force
+    # The Windows 11 explorer command injector (appx) is Zed-signed and not built for OTerminal;
+    # zed.iss falls back to the classic registry context menu when appx\ is empty.
     New-Item -Path "$innoDir\appx" -ItemType Directory -Force
     New-Item -Path "$innoDir\bin" -ItemType Directory -Force
     New-Item -Path "$innoDir\tools" -ItemType Directory -Force
@@ -113,26 +130,19 @@ function GenerateLicenses {
     . $PSScriptRoot/generate-licenses.ps1
 }
 
-function BuildZedAndItsFriends {
-    Write-Output "Building Zed and its friends, for channel: $channel"
-    # Build zed.exe, cli.exe and auto_update_helper.exe
+function BuildOTerminalAndItsFriends {
+    Write-Output "Building OTerminal and its friends, for channel: $channel"
+    # Build oterminal.exe (package zed), cli.exe and auto_update_helper.exe
     cargo --config .cargo/bundle-config.toml build --release --package zed --package cli --package auto_update_helper --target $target
-    Copy-Item -Path ".\$CargoOutDir\zed.exe" -Destination "$innoDir\Zed.exe" -Force
+
+    # The zed package's [[bin]] is named "oterminal"; fall back to zed.exe for older trees.
+    $appExe = ".\$CargoOutDir\oterminal.exe"
+    if (-not (Test-Path $appExe)) {
+        $appExe = ".\$CargoOutDir\zed.exe"
+    }
+    Copy-Item -Path $appExe -Destination "$innoDir\oterminal.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\cli.exe" -Destination "$innoDir\cli.exe" -Force
     Copy-Item -Path ".\$CargoOutDir\auto_update_helper.exe" -Destination "$innoDir\auto_update_helper.exe" -Force
-    # Build explorer_command_injector.dll
-    switch ($channel) {
-        "stable" {
-            cargo --config .cargo/bundle-config.toml build --release --features stable --no-default-features --package explorer_command_injector --target $target
-        }
-        "preview" {
-            cargo --config .cargo/bundle-config.toml build --release --features preview --no-default-features --package explorer_command_injector --target $target
-        }
-        default {
-            cargo --config .cargo/bundle-config.toml build --release --package explorer_command_injector --target $target
-        }
-    }
-    Copy-Item -Path ".\$CargoOutDir\explorer_command_injector.dll" -Destination "$innoDir\zed_explorer_command_injector.dll" -Force
 }
 
 function BuildRemoteServer {
@@ -147,78 +157,33 @@ function BuildRemoteServer {
         & "$innoDir\sign.ps1" $remoteServerSrc
     }
 
-    $remoteServerDst = "$env:ZED_WORKSPACE\target\zed-remote-server-windows-$Architecture.zip"
+    $remoteServerDst = "$env:ZED_WORKSPACE\target\oterminal-remote-server-windows-$Architecture.zip"
     Write-Output "Compressing remote_server to $remoteServerDst"
     Compress-Archive -Path $remoteServerSrc -DestinationPath $remoteServerDst -Force
 
     Write-Output "Remote server compressed successfully"
 }
 
-function ZipZedAndItsFriendsDebug {
+function ZipOTerminalDebug {
     $items = @(
+        ".\$CargoOutDir\oterminal.pdb",
         ".\$CargoOutDir\zed.pdb",
         ".\$CargoOutDir\cli.pdb",
         ".\$CargoOutDir\auto_update_helper.pdb",
-        ".\$CargoOutDir\explorer_command_injector.pdb",
         ".\$CargoOutDir\remote_server.pdb"
-    )
+    ) | Where-Object { Test-Path $_ }
 
-    Compress-Archive -Path $items -DestinationPath ".\$CargoOutDir\zed-$env:RELEASE_VERSION-$env:ZED_RELEASE_CHANNEL.dbg.zip" -Force
-}
-
-
-function UploadToSentry {
-    if (-not (Get-Command "sentry-cli" -ErrorAction SilentlyContinue)) {
-        Write-Output "sentry-cli not found. skipping sentry upload."
-        Write-Output "install with: 'winget install -e --id=Sentry.sentry-cli'"
-        return
-    }
-    if ([string]::IsNullOrWhiteSpace($env:SENTRY_AUTH_TOKEN)) {
-        Write-Output "missing SENTRY_AUTH_TOKEN. skipping sentry upload."
-        return
-    }
-    Write-Output "Uploading zed debug symbols to sentry..."
-    for ($i = 1; $i -le 3; $i++) {
-        try {
-            sentry-cli debug-files upload --include-sources --wait -p zed -o zed-dev $CargoOutDir
-            break
-        }
-        catch {
-            Write-Output "Sentry upload attempt $i failed: $_"
-            if ($i -eq 3) {
-                Write-Output "All sentry upload attempts failed"
-                throw
-            }
-            Start-Sleep -Seconds 2
-        }
+    if ($items.Count -gt 0) {
+        Compress-Archive -Path $items -DestinationPath $debugArchive -Force
     }
 }
 
-function MakeAppx {
-    switch ($channel) {
-        "stable" {
-            $manifestFile = "$env:ZED_WORKSPACE\crates\explorer_command_injector\AppxManifest.xml"
-        }
-        "preview" {
-            $manifestFile = "$env:ZED_WORKSPACE\crates\explorer_command_injector\AppxManifest-Preview.xml"
-        }
-        default {
-            $manifestFile = "$env:ZED_WORKSPACE\crates\explorer_command_injector\AppxManifest-Nightly.xml"
-        }
-    }
-    Copy-Item -Path "$manifestFile" -Destination "$innoDir\make_appx\AppxManifest.xml"
-    # Add makeAppx.exe to Path
-    $sdk = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64"
-    $env:Path += ';' + $sdk
-    makeAppx.exe pack /d "$innoDir\make_appx" /p "$innoDir\zed_explorer_command_injector.appx" /nv
-}
-
-function SignZedAndItsFriends {
+function SignOTerminalAndItsFriends {
     if (-not $canCodeSign) {
         return
     }
 
-    $files = "$innoDir\Zed.exe,$innoDir\cli.exe,$innoDir\auto_update_helper.exe,$innoDir\zed_explorer_command_injector.dll,$innoDir\zed_explorer_command_injector.appx"
+    $files = "$innoDir\oterminal.exe,$innoDir\cli.exe,$innoDir\auto_update_helper.exe"
     & "$innoDir\sign.ps1" $files
 }
 
@@ -233,100 +198,94 @@ function DownloadAMDGpuServices {
 }
 
 function DownloadConpty {
-    $url = "https://github.com/microsoft/terminal/releases/download/v1.23.13503.0/Microsoft.Windows.Console.ConPTY.1.23.251216003.nupkg"
-    $zipPath = ".\Microsoft.Windows.Console.ConPTY.1.23.251216003.nupkg"
+    # ConPTY (conpty.dll + OpenConsole.exe) is required for correct mouse and key
+    # handling in terminal TUIs such as Claude Code.
+    $url = "https://github.com/microsoft/terminal/releases/download/$ConptyVersionTag/$ConptyPackage"
+    $zipPath = ".\$ConptyPackage.zip"
     Invoke-WebRequest -Uri $url -OutFile $zipPath
+    if (Test-Path ".\conpty") {
+        Remove-Item -Path ".\conpty" -Recurse -Force
+    }
     Expand-Archive -Path $zipPath -DestinationPath ".\conpty" -Force
 }
 
 function CollectFiles {
-    Move-Item -Path "$innoDir\zed_explorer_command_injector.appx" -Destination "$innoDir\appx\zed_explorer_command_injector.appx" -Force
-    Move-Item -Path "$innoDir\zed_explorer_command_injector.dll" -Destination "$innoDir\appx\zed_explorer_command_injector.dll" -Force
-    Move-Item -Path "$innoDir\cli.exe" -Destination "$innoDir\bin\zed.exe" -Force
-    Move-Item -Path "$innoDir\zed.sh" -Destination "$innoDir\bin\zed" -Force
+    Move-Item -Path "$innoDir\cli.exe" -Destination "$innoDir\bin\oterminal.exe" -Force
+    Move-Item -Path "$innoDir\zed.sh" -Destination "$innoDir\bin\oterminal" -Force
     Move-Item -Path "$innoDir\auto_update_helper.exe" -Destination "$innoDir\tools\auto_update_helper.exe" -Force
+    New-Item -Type Directory -Path "$innoDir\arm64" -Force
+    Copy-Item -Path ".\conpty\build\native\runtimes\arm64\OpenConsole.exe" -Destination "$innoDir\arm64\OpenConsole.exe" -Force
     if($Architecture -eq "aarch64") {
-        New-Item -Type Directory -Path "$innoDir\arm64" -Force
-        Move-Item -Path ".\conpty\build\native\runtimes\arm64\OpenConsole.exe" -Destination "$innoDir\arm64\OpenConsole.exe" -Force
-        Move-Item -Path ".\conpty\runtimes\win-arm64\native\conpty.dll" -Destination "$innoDir\conpty.dll" -Force
+        # conpty.dll and OpenConsole.exe next to oterminal.exe (same layout as `cargo build`).
+        Copy-Item -Path ".\conpty\build\native\runtimes\arm64\OpenConsole.exe" -Destination "$innoDir\OpenConsole.exe" -Force
+        Copy-Item -Path ".\conpty\runtimes\win-arm64\native\conpty.dll" -Destination "$innoDir\conpty.dll" -Force
     }
     else {
         New-Item -Type Directory -Path "$innoDir\x64" -Force
-        New-Item -Type Directory -Path "$innoDir\arm64" -Force
         Move-Item -Path ".\AGS_SDK-6.3.0\ags_lib\lib\amd_ags_x64.dll" -Destination "$innoDir\amd_ags_x64.dll" -Force
-        Move-Item -Path ".\conpty\build\native\runtimes\x64\OpenConsole.exe" -Destination "$innoDir\x64\OpenConsole.exe" -Force
-        Move-Item -Path ".\conpty\build\native\runtimes\arm64\OpenConsole.exe" -Destination "$innoDir\arm64\OpenConsole.exe" -Force
-        Move-Item -Path ".\conpty\runtimes\win-x64\native\conpty.dll" -Destination "$innoDir\conpty.dll" -Force
+        Copy-Item -Path ".\conpty\build\native\runtimes\x64\OpenConsole.exe" -Destination "$innoDir\x64\OpenConsole.exe" -Force
+        # conpty.dll and OpenConsole.exe next to oterminal.exe (same layout as `cargo build`).
+        Copy-Item -Path ".\conpty\build\native\runtimes\x64\OpenConsole.exe" -Destination "$innoDir\OpenConsole.exe" -Force
+        Copy-Item -Path ".\conpty\runtimes\win-x64\native\conpty.dll" -Destination "$innoDir\conpty.dll" -Force
     }
 }
 
 function BuildInstaller {
     $issFilePath = "$innoDir\zed.iss"
+    # The mutex names below must match release_channel::app_identifier() + "-Instance-Mutex"
+    # (see crates\zed\src\zed\windows_only_instance.rs).
     switch ($channel) {
         "stable" {
-            $appId = "{{2DB0DA96-CA55-49BB-AF4F-64AF36A86712}"
+            $appId = "{{6F1B3C2A-5E4D-4A7B-9C1E-0A7E5D1B2C01}"
             $appIconName = "app-icon"
-            $appName = "Zed"
-            $appDisplayName = "Zed"
-            $appSetupName = "Zed-$Architecture"
-            # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs
-            $appMutex = "Zed-Stable-Instance-Mutex"
-            $appExeName = "Zed"
-            $regValueName = "Zed"
-            $appUserId = "ZedIndustries.Zed"
-            $appShellNameShort = "Z&ed"
-            $appAppxFullName = "ZedIndustries.Zed_1.0.0.0_neutral__japxn1gcva8rg"
+            $appName = "OTerminal"
+            $appDisplayName = "OTerminal"
+            $appMutex = "OTerminal-Stable-Instance-Mutex"
+            $regValueName = "OTerminal"
+            $appUserId = "com.othcloud.oterminal"
+            $appShellNameShort = "O&Terminal"
         }
         "preview" {
-            $appId = "{{F70E4811-D0E2-4D88-AC99-D63752799F95}"
+            $appId = "{{6F1B3C2A-5E4D-4A7B-9C1E-0A7E5D1B2C02}"
             $appIconName = "app-icon-preview"
-            $appName = "Zed Preview"
-            $appDisplayName = "Zed Preview"
-            $appSetupName = "Zed-$Architecture"
-            # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs
-            $appMutex = "Zed-Preview-Instance-Mutex"
-            $appExeName = "Zed"
-            $regValueName = "ZedPreview"
-            $appUserId = "ZedIndustries.Zed.Preview"
-            $appShellNameShort = "Z&ed Preview"
-            $appAppxFullName = "ZedIndustries.Zed.Preview_1.0.0.0_neutral__japxn1gcva8rg"
+            $appName = "OTerminal Preview"
+            $appDisplayName = "OTerminal Preview"
+            $appMutex = "OTerminal-Preview-Instance-Mutex"
+            $regValueName = "OTerminalPreview"
+            $appUserId = "com.othcloud.oterminal.preview"
+            $appShellNameShort = "O&Terminal Preview"
         }
         "nightly" {
-            $appId = "{{1BDB21D3-14E7-433C-843C-9C97382B2FE0}"
+            $appId = "{{6F1B3C2A-5E4D-4A7B-9C1E-0A7E5D1B2C03}"
             $appIconName = "app-icon-nightly"
-            $appName = "Zed Nightly"
-            $appDisplayName = "Zed Nightly"
-            $appSetupName = "Zed-$Architecture"
-            # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs
-            $appMutex = "Zed-Nightly-Instance-Mutex"
-            $appExeName = "Zed"
-            $regValueName = "ZedNightly"
-            $appUserId = "ZedIndustries.Zed.Nightly"
-            $appShellNameShort = "Z&ed Editor Nightly"
-            $appAppxFullName = "ZedIndustries.Zed.Nightly_1.0.0.0_neutral__japxn1gcva8rg"
+            $appName = "OTerminal Nightly"
+            $appDisplayName = "OTerminal Nightly"
+            $appMutex = "OTerminal-Nightly-Instance-Mutex"
+            $regValueName = "OTerminalNightly"
+            $appUserId = "com.othcloud.oterminal.nightly"
+            $appShellNameShort = "O&Terminal Nightly"
         }
         "dev" {
-            $appId = "{{8357632E-24A4-4F32-BA97-E575B4D1FE5D}"
+            $appId = "{{6F1B3C2A-5E4D-4A7B-9C1E-0A7E5D1B2C04}"
             $appIconName = "app-icon-dev"
-            $appName = "Zed Dev"
-            $appDisplayName = "Zed Dev"
-            $appSetupName = "Zed-$Architecture"
-            # The mutex name here should match the mutex name in crates\zed\src\zed\windows_only_instance.rs
-            $appMutex = "Zed-Dev-Instance-Mutex"
-            $appExeName = "Zed"
-            $regValueName = "ZedDev"
-            $appUserId = "ZedIndustries.Zed.Dev"
-            $appShellNameShort = "Z&ed Dev"
-            $appAppxFullName = "ZedIndustries.Zed.Dev_1.0.0.0_neutral__japxn1gcva8rg"
+            $appName = "OTerminal Dev"
+            $appDisplayName = "OTerminal Dev"
+            $appMutex = "OTerminal-Dev-Instance-Mutex"
+            $regValueName = "OTerminalDev"
+            $appUserId = "com.othcloud.oterminal.dev"
+            $appShellNameShort = "O&Terminal Dev"
         }
         default {
             Write-Error "can't bundle installer for $channel."
             exit 1
         }
     }
+    $appSetupName = "OTerminal-$Architecture"
+    $appExeName = "oterminal"
+    # Only used when an explorer command injector appx is bundled (not by default).
+    $appAppxFullName = "OverTimeHosting.OTerminal_1.0.0.0_neutral__0000000000000"
 
     # Windows runner 2022 default has iscc in PATH, https://github.com/actions/runner-images/blob/main/images/windows/Windows2022-Readme.md
-    # Currently, we are using Windows 2022 runner.
     # Windows runner 2025 doesn't have iscc in PATH for now, https://github.com/actions/runner-images/issues/11228
     $innoSetupPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
 
@@ -362,47 +321,55 @@ function BuildInstaller {
     }
 
     # Execute Inno Setup
-    Write-Host "🚀 Running Inno Setup: $innoSetupPath $innoArgs"
+    Write-Host "Running Inno Setup: $innoSetupPath $innoArgs"
     $process = Start-Process -FilePath $innoSetupPath -ArgumentList $innoArgs -NoNewWindow -Wait -PassThru
 
     if ($process.ExitCode -eq 0) {
-        Write-Host "✅ Inno Setup successfully compiled the installer"
-        Write-Output "SETUP_PATH=target/$appSetupName.exe" >> $env:GITHUB_ENV
+        Write-Host "Inno Setup successfully compiled the installer"
+        if ($env:GITHUB_ENV) {
+            Write-Output "SETUP_PATH=target/$appSetupName.exe" >> $env:GITHUB_ENV
+        }
+        $script:setupPath = "$env:ZED_WORKSPACE\target\$appSetupName.exe"
         $script:buildSuccess = $true
     }
     else {
-        Write-Host "❌ Inno Setup failed: $($process.ExitCode)"
+        Write-Host "Inno Setup failed: $($process.ExitCode)"
         $script:buildSuccess = $false
     }
 }
 
 ParseZedWorkspace
+if ([string]::IsNullOrWhiteSpace($env:RELEASE_VERSION)) {
+    # Local builds: take the version from crates/zed/Cargo.toml.
+    $versionLine = Select-String -Path "$env:ZED_WORKSPACE\crates\zed\Cargo.toml" -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+    if ($versionLine) {
+        $env:RELEASE_VERSION = $versionLine.Matches[0].Groups[1].Value
+    }
+}
 $innoDir = "$env:ZED_WORKSPACE\inno\$Architecture"
-$debugArchive = "$CargoOutDir\zed-$env:RELEASE_VERSION-$env:ZED_RELEASE_CHANNEL.dbg.zip"
-$debugStoreKey = "$env:ZED_RELEASE_CHANNEL/zed-$env:RELEASE_VERSION-$env:ZED_RELEASE_CHANNEL.dbg.zip"
+$debugArchive = "$CargoOutDir\oterminal-$env:RELEASE_VERSION-$env:ZED_RELEASE_CHANNEL.dbg.zip"
 
 CheckEnvironmentVariables
 PrepareForBundle
 GenerateLicenses
-BuildZedAndItsFriends
-BuildRemoteServer
-MakeAppx
-SignZedAndItsFriends
-ZipZedAndItsFriendsDebug
-DownloadAMDGpuServices
+BuildOTerminalAndItsFriends
+if ($RemoteServer) {
+    BuildRemoteServer
+}
+SignOTerminalAndItsFriends
+ZipOTerminalDebug
+if ($Architecture -ne "aarch64") {
+    DownloadAMDGpuServices
+}
 DownloadConpty
 CollectFiles
 BuildInstaller
 
-if($env:CI) {
-    UploadToSentry
-}
-
 if ($buildSuccess) {
     Write-Output "Build successful"
     if ($Install) {
-        Write-Output "Installing Zed..."
-        Start-Process -FilePath "$env:ZED_WORKSPACE/target/ZedEditorUserSetup-x64-$env:RELEASE_VERSION.exe"
+        Write-Output "Installing OTerminal..."
+        Start-Process -FilePath $setupPath
     }
     exit 0
 }

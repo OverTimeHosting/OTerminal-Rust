@@ -1,7 +1,11 @@
 mod application_menu;
+// Collaboration UI is not rendered in OTerminal; the module stays for upstream merges.
+#[allow(dead_code)]
 pub mod collab;
 mod onboarding_banner;
 mod plan_chip;
+// Some settings (sign-in, user menu, banner) are not rendered in OTerminal.
+#[allow(dead_code)]
 mod title_bar_settings;
 mod update_version;
 
@@ -15,6 +19,7 @@ pub use platform_title_bar::{
     ShowNextWindowTab, ShowPreviousWindowTab,
 };
 use project::{linked_worktree_short_name, repo_identity_path, repo_identity_path_if_local};
+use project_tabs::ProjectTabs;
 
 #[cfg(not(target_os = "macos"))]
 use crate::application_menu::{
@@ -27,10 +32,9 @@ use client::{Client, UserStore, zed_urls};
 use command_palette_hooks::CommandPaletteFilter;
 
 use gpui::{
-    Action, Anchor, Animation, AnimationExt, AnyElement, App, Context, Element, Entity, Focusable,
-    InteractiveElement, IntoElement, MouseButton, ParentElement, Render,
-    StatefulInteractiveElement, Styled, Subscription, TaskExt, WeakEntity, Window, actions, div,
-    pulsating_between,
+    Action, Anchor, AnyElement, App, Context, Element, Entity, Focusable, InteractiveElement,
+    IntoElement, MouseButton, ParentElement, Render, StatefulInteractiveElement, Styled,
+    StyledImage, Subscription, TaskExt, WeakEntity, Window, actions, div, img, px,
 };
 use onboarding_banner::OnboardingBanner;
 use project::{
@@ -43,7 +47,6 @@ use settings::{Settings as _, SettingsStore};
 use std::any::TypeId;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 use theme::ActiveTheme;
 use title_bar_settings::TitleBarSettings;
 use ui::{
@@ -216,10 +219,27 @@ pub struct TitleBar {
     multi_workspace: Option<WeakEntity<MultiWorkspace>>,
     application_menu: Option<Entity<ApplicationMenu>>,
     _subscriptions: Vec<Subscription>,
+    // Not rendered in OTerminal; kept so upstream code paths still compile.
+    #[allow(dead_code)]
     banner: Option<Entity<OnboardingBanner>>,
     update_version: Entity<UpdateVersion>,
+    #[allow(dead_code)]
     screen_share_popover_handle: PopoverMenuHandle<ContextMenu>,
     _diagnostics_subscription: Option<gpui::Subscription>,
+    /// OTerminal project tabs, created once the multi-workspace is known.
+    project_tabs: Option<Entity<ProjectTabs>>,
+}
+
+/// The OTH logo shown at the start of the title bar.
+fn render_logo() -> impl IntoElement {
+    div()
+        .flex_none()
+        .px_1()
+        .child(img("images/oth_logo.png").size(px(16.)).with_fallback(|| {
+            Icon::new(IconName::Othcloud)
+                .size(IconSize::Small)
+                .into_any_element()
+        }))
 }
 
 impl Render for TitleBar {
@@ -235,6 +255,15 @@ impl Render for TitleBar {
                     titlebar.set_multi_workspace(mw);
                 });
             }
+        }
+
+        // Created lazily here rather than in `TitleBar::new`: `new` runs while
+        // the workspace is being constructed (and leased), and the tabs read
+        // every workspace of the window.
+        if self.project_tabs.is_none()
+            && let Some(mw) = self.multi_workspace.as_ref().and_then(|mw| mw.upgrade())
+        {
+            self.project_tabs = Some(cx.new(|cx| ProjectTabs::new(&mw, window, cx)));
         }
 
         let title_bar_settings = *TitleBarSettings::get_global(cx);
@@ -306,106 +335,64 @@ impl Render for TitleBar {
             }
         }
 
+        // OTerminal title bar, left to right: application menu, OTH logo,
+        // project tabs | branch/worktree, update notice, window controls.
+        // Collaboration, call controls, sign-in and the user menu are not
+        // rendered (OTHCloud sign-in lives in the OTHCloud panel).
+        let application_menu = self.application_menu.clone().filter(|_| !show_menus);
+        // Hide the project items to make room when the menu bar is expanded --
+        // except in accessible mode, where the menu bar is always expanded but
+        // those controls must still remain reachable.
+        let render_project_items = application_menu.as_ref().is_none_or(|menu| {
+            !menu.update(cx, |menu, cx| menu.all_menus_shown(cx)) || cx.accessible_mode()
+        });
+        let project_tabs = self.project_tabs.clone();
+
         children.push(
             h_flex()
                 .h_full()
-                .gap_0p5()
-                .map(|title_bar| {
-                    let mut render_project_items = title_bar_settings.show_branch_name
-                        || title_bar_settings.show_project_items;
+                .min_w_0()
+                .gap_1()
+                .children(application_menu)
+                .child(render_logo())
+                .children(self.render_restricted_mode(cx))
+                .when(render_project_items, |title_bar| {
                     title_bar
-                        .when_some(
-                            self.application_menu.clone().filter(|_| !show_menus),
-                            |title_bar, menu| {
-                                // Hide the project/branch items to make room when the
-                                // menu bar is expanded -- except in accessible mode,
-                                // where the menu bar is always expanded but those
-                                // controls must still remain reachable.
-                                render_project_items &= !menu
-                                    .update(cx, |menu, cx| menu.all_menus_shown(cx))
-                                    || cx.accessible_mode();
-                                title_bar.child(menu)
-                            },
-                        )
-                        .children(self.render_restricted_mode(cx))
-                        .when(render_project_items, |title_bar| {
-                            title_bar
-                                .when(title_bar_settings.show_project_items, |title_bar| {
-                                    title_bar
-                                        .children(self.render_project_host(cx))
-                                        .child(self.render_project_name(project_name, window, cx))
+                        .children(self.render_project_host(cx))
+                        .map(|title_bar| match project_tabs {
+                            Some(project_tabs) => title_bar.child(project_tabs),
+                            None => {
+                                title_bar.when(title_bar_settings.show_project_items, |title_bar| {
+                                    title_bar.child(self.render_project_name(
+                                        project_name,
+                                        window,
+                                        cx,
+                                    ))
                                 })
-                                .when_some(
-                                    repository.filter(|_| is_git_enabled),
-                                    |title_bar, repository| {
-                                        title_bar.children(self.render_worktree_and_branch(
-                                            repository,
-                                            linked_worktree_name,
-                                            cx,
-                                        ))
-                                    },
-                                )
+                            }
                         })
                 })
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .into_any_element(),
         );
 
-        children.push(self.render_collaborator_list(window, cx).into_any_element());
-
-        if title_bar_settings.show_onboarding_banner {
-            if let Some(banner) = &self.banner {
-                children.push(banner.clone().into_any_element())
-            }
-        }
-
-        let status = self.client.status();
-        let status = &*status.borrow();
-        let user = self.user_store.read(cx).current_user();
-        let is_signing_in = user.is_none()
-            && matches!(
-                status,
-                client::Status::Authenticating
-                    | client::Status::Authenticated
-                    | client::Status::Connecting
-            );
-        let is_signed_out_or_auth_error = user.is_none()
-            && matches!(
-                status,
-                client::Status::SignedOut | client::Status::AuthenticationError
-            );
-
         children.push(
             h_flex()
+                .flex_none()
                 .pr_1()
                 .gap_1()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .child(self.render_call_controls(window, cx))
-                .children(self.render_connection_status(status, cx))
-                .child(self.update_version.clone())
-                .when(
-                    user.is_none()
-                        && is_signed_out_or_auth_error
-                        && TitleBarSettings::get_global(cx).show_sign_in,
-                    |this| this.child(self.render_sign_in_button(cx)),
+                .when_some(
+                    repository.filter(|_| is_git_enabled && render_project_items),
+                    |title_bar, repository| {
+                        title_bar.children(self.render_worktree_and_branch(
+                            repository,
+                            linked_worktree_name,
+                            cx,
+                        ))
+                    },
                 )
-                .when(is_signing_in, |this| {
-                    this.child(
-                        Label::new("Signing in…")
-                            .size(LabelSize::Small)
-                            .color(Color::Muted)
-                            .with_animation(
-                                "signing-in",
-                                Animation::new(Duration::from_secs(2))
-                                    .repeat()
-                                    .with_easing(pulsating_between(0.4, 0.8)),
-                                |label, delta| label.alpha(delta),
-                            ),
-                    )
-                })
-                .when(TitleBarSettings::get_global(cx).show_user_menu, |this| {
-                    this.child(self.render_user_menu_button(cx))
-                })
+                .child(self.update_version.clone())
                 .into_any_element(),
         );
 
@@ -534,6 +521,7 @@ impl TitleBar {
             update_version,
             screen_share_popover_handle: PopoverMenuHandle::default(),
             _diagnostics_subscription: None,
+            project_tabs: None,
         };
 
         this.observe_diagnostics(cx);
@@ -1147,6 +1135,7 @@ impl TitleBar {
             .log_err();
     }
 
+    #[allow(dead_code)]
     fn render_connection_status(
         &self,
         status: &client::Status,

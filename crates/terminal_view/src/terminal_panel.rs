@@ -12,15 +12,20 @@ use db::kvp::KeyValueStore;
 use futures::{channel::oneshot, future::join_all};
 use gpui::{
     Action, Anchor, App, AsyncApp, AsyncWindowContext, Context, Entity, EventEmitter, FocusHandle,
-    Focusable, IntoElement, ParentElement, Pixels, Render, Styled, Task, TaskExt, WeakEntity,
-    Window, actions,
+    Focusable, Global, IntoElement, ParentElement, Pixels, Render, Styled, Task, TaskExt,
+    WeakEntity, Window, actions,
 };
 use itertools::Itertools;
 use project::{Fs, Project};
 
+use schemars::JsonSchema;
+use serde::Deserialize;
 use settings::{Settings, TerminalDockPosition};
 use task::{RevealStrategy, RevealTarget, Shell, ShellBuilder, SpawnInTerminal, TaskId};
-use terminal::{Terminal, terminal_settings::TerminalSettings};
+use terminal::{
+    Terminal,
+    terminal_settings::{TerminalProfile, TerminalSettings},
+};
 use ui::{
     ButtonLike, Clickable, CommonAnimationExt, ContextMenu, FluentBuilder, PopoverMenu,
     SplitButton, Toggleable, Tooltip, prelude::*,
@@ -52,10 +57,281 @@ actions!(
     ]
 );
 
+/// Opens a new terminal in the terminal panel running the named terminal profile.
+///
+/// Profiles come from runtime sources (such as OTHCloud), the `terminal.profiles`
+/// setting, and the built-in profiles (shells and "Claude Code").
+#[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
+#[action(namespace = terminal_panel)]
+#[serde(deny_unknown_fields)]
+pub struct NewTerminalWithProfile {
+    /// The name of the profile to launch.
+    pub profile: String,
+}
+
+/// The name of the built-in Claude Code profile.
+pub const CLAUDE_CODE_PROFILE: &str = "Claude Code";
+
+/// Terminal profiles provided at runtime (e.g. synced from OTHCloud), grouped by
+/// section. Entries are `(section, name, profile)`. These are never written to
+/// settings files.
+#[derive(Default)]
+pub struct ExtraTerminalProfiles(pub Vec<(String, String, TerminalProfile)>);
+
+impl Global for ExtraTerminalProfiles {}
+
+/// Replaces all runtime terminal profiles of `section` with `profiles`.
+pub fn set_extra_terminal_profiles(
+    section: &str,
+    profiles: Vec<(String, TerminalProfile)>,
+    cx: &mut App,
+) {
+    let extras = cx.default_global::<ExtraTerminalProfiles>();
+    extras
+        .0
+        .retain(|(existing_section, _, _)| existing_section != section);
+    extras.0.extend(
+        profiles
+            .into_iter()
+            .map(|(name, profile)| (section.to_string(), name, profile)),
+    );
+}
+
+/// Runtime profiles grouped by section, in insertion order.
+pub fn extra_terminal_profile_sections(cx: &App) -> Vec<(String, Vec<String>)> {
+    let mut sections: Vec<(String, Vec<String>)> = Vec::new();
+    if let Some(extras) = cx.try_global::<ExtraTerminalProfiles>() {
+        for (section, name, _) in &extras.0 {
+            match sections
+                .iter_mut()
+                .find(|(existing, _)| existing == section)
+            {
+                Some((_, names)) => names.push(name.clone()),
+                None => sections.push((section.clone(), vec![name.clone()])),
+            }
+        }
+    }
+    sections
+}
+
+/// Names of the built-in and settings profiles, in menu order (built-ins first,
+/// then settings profiles that don't override a built-in).
+pub fn local_terminal_profile_names(cx: &App) -> Vec<String> {
+    let mut names = builtin_terminal_profiles()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect::<Vec<_>>();
+    for name in TerminalSettings::get_global(cx).profiles.keys() {
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+    names
+}
+
+/// Looks up a profile by name: runtime profiles first, then the
+/// `terminal.profiles` setting, then the built-in profiles.
+pub fn resolve_profile(name: &str, cx: &App) -> Option<TerminalProfile> {
+    if let Some(extras) = cx.try_global::<ExtraTerminalProfiles>()
+        && let Some((_, _, profile)) = extras.0.iter().find(|(_, extra, _)| extra == name)
+    {
+        return Some(profile.clone());
+    }
+    if let Some(profile) = TerminalSettings::get_global(cx).profiles.get(name) {
+        return Some(profile.clone());
+    }
+    builtin_terminal_profiles()
+        .into_iter()
+        .find_map(|(builtin, profile)| (builtin == name).then_some(profile))
+}
+
+/// The profiles OTerminal offers out of the box on the current platform.
+pub fn builtin_terminal_profiles() -> Vec<(String, TerminalProfile)> {
+    let mut profiles = Vec::new();
+
+    #[cfg(windows)]
+    {
+        profiles.push((
+            "PowerShell".to_string(),
+            TerminalProfile {
+                program: Some(util::shell::get_windows_system_shell()),
+                args: vec!["-NoLogo".to_string()],
+                icon: Some("terminal".to_string()),
+                ..Default::default()
+            },
+        ));
+        profiles.push((
+            "Command Prompt".to_string(),
+            TerminalProfile {
+                program: Some("cmd.exe".to_string()),
+                icon: Some("terminal".to_string()),
+                ..Default::default()
+            },
+        ));
+        let git_bash = util::shell::get_windows_bash().or_else(|| {
+            let default = r"C:\Program Files\Git\bin\bash.exe";
+            std::path::Path::new(default)
+                .is_file()
+                .then(|| default.to_string())
+        });
+        if let Some(git_bash) = git_bash {
+            profiles.push((
+                "Git Bash".to_string(),
+                TerminalProfile {
+                    program: Some(git_bash),
+                    args: vec!["--login".to_string(), "-i".to_string()],
+                    icon: Some("terminal".to_string()),
+                    ..Default::default()
+                },
+            ));
+        }
+    }
+
+    #[cfg(not(windows))]
+    profiles.push((
+        "Shell".to_string(),
+        TerminalProfile {
+            program: None,
+            icon: Some("terminal".to_string()),
+            ..Default::default()
+        },
+    ));
+
+    profiles.push((
+        CLAUDE_CODE_PROFILE.to_string(),
+        TerminalProfile {
+            program: Some("claude".to_string()),
+            icon: Some("ai_claude".to_string()),
+            ..Default::default()
+        },
+    ));
+
+    profiles
+}
+
+/// `claude` subcommands that don't start an interactive session, so they must
+/// not receive session flags such as `--add-dir`.
+const CLAUDE_NON_SESSION_SUBCOMMANDS: &[&str] = &[
+    "mcp",
+    "config",
+    "doctor",
+    "update",
+    "install",
+    "migrate-installer",
+    "setup-token",
+    "plugin",
+];
+
+/// Whether `program` launches Claude Code (`claude`, `claude.exe`, `claude.cmd`, ...).
+pub fn is_claude_program(program: &str) -> bool {
+    let file_name = program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program)
+        .to_ascii_lowercase();
+    let stem = [".exe", ".cmd", ".bat", ".ps1"]
+        .into_iter()
+        .find_map(|extension| file_name.strip_suffix(extension))
+        .unwrap_or(&file_name);
+    stem == "claude"
+}
+
+/// Adds `--add-dir <dir>` for every extra project root when `program` starts an
+/// interactive Claude Code session, so Claude can see the whole multi-root project.
+pub fn apply_claude_launch_rules(
+    program: &str,
+    args: &mut Vec<String>,
+    additional_dirs: impl IntoIterator<Item = PathBuf>,
+) {
+    if !is_claude_program(program) {
+        return;
+    }
+    if args
+        .first()
+        .is_some_and(|first| CLAUDE_NON_SESSION_SUBCOMMANDS.contains(&first.as_str()))
+    {
+        return;
+    }
+    for dir in additional_dirs {
+        let dir = dir.to_string_lossy().to_string();
+        let already_added = args
+            .windows(2)
+            .any(|pair| pair[0] == "--add-dir" && pair[1] == dir);
+        if !already_added {
+            args.push("--add-dir".to_string());
+            args.push(dir);
+        }
+    }
+}
+
+/// Builds the command used to launch `profile` locally, making Claude Code start
+/// reliably (and explaining how to install it when it is missing).
+fn local_launch_command(program: String, args: Vec<String>) -> (String, Vec<String>) {
+    if !is_claude_program(&program) {
+        return (program, args);
+    }
+
+    #[cfg(windows)]
+    {
+        let is_bare_name = !program.contains(['/', '\\']);
+        let native_install = dirs::home_dir()
+            .map(|home| home.join(".local").join("bin").join("claude.exe"))
+            .filter(|path| path.is_file());
+        if is_bare_name && find_on_windows_path(&program).is_none() {
+            if let Some(native_install) = native_install {
+                return (native_install.to_string_lossy().to_string(), args);
+            }
+            let message = "Claude Code was not found on PATH. Install it with: \
+                irm https://claude.ai/install.ps1 | iex   (then open a new Claude Code terminal)";
+            return (
+                util::shell::get_windows_system_shell(),
+                vec![
+                    "-NoLogo".to_string(),
+                    "-NoExit".to_string(),
+                    "-Command".to_string(),
+                    // Single quotes: embedded double quotes get backslash-escaped
+                    // when the command line is built, which PowerShell mis-parses.
+                    format!("Write-Host '{message}' -ForegroundColor Yellow"),
+                ],
+            );
+        }
+        (program, args)
+    }
+
+    #[cfg(not(windows))]
+    {
+        // Resolve `claude` through the user's login environment (the terminal env
+        // already contains it), falling back to an interactive shell with a hint.
+        let script = "command -v \"$0\" >/dev/null 2>&1 && exec \"$0\" \"$@\"; \
+            echo 'Claude Code was not found on PATH. Install it with: curl -fsSL https://claude.ai/install.sh | bash'; \
+            exec \"${SHELL:-/bin/sh}\" -l";
+        let mut wrapped_args = vec!["-c".to_string(), script.to_string(), program];
+        wrapped_args.extend(args);
+        ("/bin/sh".to_string(), wrapped_args)
+    }
+}
+
+#[cfg(windows)]
+fn find_on_windows_path(program: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let has_extension = std::path::Path::new(program).extension().is_some();
+    std::env::split_paths(&path).find_map(|dir| {
+        if has_extension {
+            let candidate = dir.join(program);
+            return candidate.is_file().then_some(candidate);
+        }
+        [".exe", ".com", ".cmd", ".bat"]
+            .into_iter()
+            .map(|extension| dir.join(format!("{program}{extension}")))
+            .find(|candidate| candidate.is_file())
+    })
+}
+
 pub fn init(cx: &mut App) {
     cx.observe_new(
         |workspace: &mut Workspace, _window, _: &mut Context<Workspace>| {
             workspace.register_action(TerminalPanel::new_terminal);
+            workspace.register_action(TerminalPanel::new_terminal_with_profile);
             workspace.register_action(TerminalPanel::open_terminal);
             workspace.register_action(|workspace, _: &ToggleFocus, window, cx| {
                 if is_enabled_in_workspace(workspace, cx) {
@@ -154,8 +430,11 @@ impl TerminalPanel {
                             .with_handle(pane.new_item_context_menu_handle.clone())
                             .menu(move |window, cx| {
                                 let focus_handle = focus_handle.clone();
+                                let local_profiles = local_terminal_profile_names(cx);
+                                let extra_sections = extra_terminal_profile_sections(cx);
                                 let menu = ContextMenu::build(window, cx, |menu, _, _| {
-                                    menu.context(focus_handle.clone())
+                                    let mut menu = menu
+                                        .context(focus_handle.clone())
                                         .action(
                                             "New Terminal",
                                             workspace::NewTerminal::default().boxed_clone(),
@@ -166,7 +445,26 @@ impl TerminalPanel {
                                         .action(
                                             "Spawn Task",
                                             zed_actions::Spawn::modal().boxed_clone(),
-                                        )
+                                        );
+                                    if !local_profiles.is_empty() {
+                                        menu = menu.separator().header("Profiles");
+                                        for profile in local_profiles {
+                                            menu = menu.action(
+                                                profile.clone(),
+                                                NewTerminalWithProfile { profile }.boxed_clone(),
+                                            );
+                                        }
+                                    }
+                                    for (section, profiles) in extra_sections {
+                                        menu = menu.separator().header(section);
+                                        for profile in profiles {
+                                            menu = menu.action(
+                                                profile.clone(),
+                                                NewTerminalWithProfile { profile }.boxed_clone(),
+                                            );
+                                        }
+                                    }
+                                    menu
                                 });
 
                                 Some(menu)
@@ -760,6 +1058,21 @@ impl TerminalPanel {
             return;
         }
 
+        if !action.local
+            && let Some(default_profile) = TerminalSettings::get_global(cx).default_profile.clone()
+            && resolve_profile(&default_profile, cx).is_some()
+        {
+            Self::new_terminal_with_profile(
+                workspace,
+                &NewTerminalWithProfile {
+                    profile: default_profile,
+                },
+                window,
+                cx,
+            );
+            return;
+        }
+
         let Some(terminal_panel) = workspace.panel::<Self>(cx) else {
             return;
         };
@@ -775,6 +1088,109 @@ impl TerminalPanel {
                 )
             })
             .detach_and_log_err(cx);
+    }
+
+    /// Opens a new terminal in the terminal panel running the given profile.
+    pub fn new_terminal_with_profile(
+        workspace: &mut Workspace,
+        action: &NewTerminalWithProfile,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        let Some(spawn_task) = Self::profile_spawn_task(workspace, &action.profile, cx) else {
+            log::warn!("unknown terminal profile {:?}", action.profile);
+            workspace.show_toast(
+                workspace::Toast::new(
+                    workspace::notifications::NotificationId::unique::<NewTerminalWithProfile>(),
+                    format!("Terminal profile \"{}\" was not found", action.profile),
+                )
+                .autohide(),
+                cx,
+            );
+            return;
+        };
+        let Some(terminal_panel) = workspace.panel::<Self>(cx) else {
+            return;
+        };
+        terminal_panel
+            .update(cx, |this, cx| {
+                this.add_terminal_task(spawn_task, RevealStrategy::Always, window, cx)
+            })
+            .detach_and_log_err(cx);
+    }
+
+    /// Resolves a terminal profile into a task that runs its program as an
+    /// interactive terminal in the panel.
+    fn profile_spawn_task(workspace: &Workspace, name: &str, cx: &App) -> Option<SpawnInTerminal> {
+        let profile = resolve_profile(name, cx)?;
+        let project = workspace.project().read(cx);
+        let is_remote = project.is_remote();
+
+        let cwd = match profile.working_directory.as_deref() {
+            Some(directory) if is_remote => Some(PathBuf::from(directory)),
+            Some(directory) => shellexpand::full(directory)
+                .ok()
+                .map(|directory| PathBuf::from(directory.as_ref()))
+                .filter(|directory| directory.is_dir()),
+            None => None,
+        }
+        .or_else(|| default_working_directory(workspace, cx));
+
+        let (command, mut args) = match profile.program {
+            Some(program) => (Some(program), profile.args),
+            None => match TerminalSettings::get_global(cx).shell.clone() {
+                Shell::System if profile.args.is_empty() => (None, Vec::new()),
+                Shell::System => (Some(util::shell::get_system_shell()), profile.args),
+                Shell::Program(program) => (Some(program), profile.args),
+                Shell::WithArguments {
+                    program,
+                    args: mut shell_args,
+                    ..
+                } => {
+                    shell_args.extend(profile.args);
+                    (Some(program), shell_args)
+                }
+            },
+        };
+
+        let command = match command {
+            Some(program) if !is_remote => {
+                let additional_dirs = project
+                    .visible_worktrees(cx)
+                    .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
+                    .filter(|root| cwd.as_ref().is_none_or(|cwd| !cwd.starts_with(root)))
+                    .collect::<Vec<_>>();
+                apply_claude_launch_rules(&program, &mut args, additional_dirs);
+                let (program, launch_args) = local_launch_command(program, args);
+                args = launch_args;
+                Some(program)
+            }
+            command => command,
+        };
+
+        let command_label = command
+            .iter()
+            .chain(args.iter())
+            .map(|part| part.as_str())
+            .join(" ");
+        Some(SpawnInTerminal {
+            id: TaskId(format!("terminal-profile:{name}")),
+            full_label: name.to_string(),
+            label: name.to_string(),
+            command,
+            args,
+            command_label,
+            cwd,
+            env: profile.env,
+            use_new_terminal: true,
+            allow_concurrent_runs: true,
+            reveal: RevealStrategy::Always,
+            reveal_target: RevealTarget::Dock,
+            show_summary: false,
+            show_command: false,
+            show_rerun: false,
+            ..Default::default()
+        })
     }
 
     fn terminals_for_task(
@@ -1882,6 +2298,80 @@ mod tests {
     use pretty_assertions::assert_eq;
     use project::FakeFs;
     use settings::SettingsStore;
+
+    #[test]
+    fn claude_launch_rules_add_extra_project_roots() {
+        assert!(is_claude_program("claude"));
+        assert!(is_claude_program(
+            r"C:\Users\me\AppData\Roaming\npm\claude.cmd"
+        ));
+        assert!(is_claude_program("/usr/local/bin/claude"));
+        assert!(!is_claude_program("claude-helper"));
+
+        let mut args = vec!["--model".to_string(), "opus".to_string()];
+        apply_claude_launch_rules(
+            "claude.exe",
+            &mut args,
+            [
+                PathBuf::from("/a"),
+                PathBuf::from("/b"),
+                PathBuf::from("/a"),
+            ],
+        );
+        assert_eq!(
+            args,
+            ["--model", "opus", "--add-dir", "/a", "--add-dir", "/b"]
+        );
+
+        let mut args = vec!["doctor".to_string()];
+        apply_claude_launch_rules("claude", &mut args, [PathBuf::from("/a")]);
+        assert_eq!(args, ["doctor"]);
+
+        let mut args = Vec::new();
+        apply_claude_launch_rules("pwsh", &mut args, [PathBuf::from("/a")]);
+        assert!(args.is_empty());
+    }
+
+    #[gpui::test]
+    fn extra_profiles_replace_their_section_and_take_precedence(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            let claude = TerminalProfile {
+                program: Some("claude".to_string()),
+                args: vec!["--continue".to_string()],
+                ..Default::default()
+            };
+            set_extra_terminal_profiles(
+                "OTHCloud",
+                vec![(CLAUDE_CODE_PROFILE.to_string(), claude.clone())],
+                cx,
+            );
+            set_extra_terminal_profiles(
+                "Other",
+                vec![("Other".to_string(), TerminalProfile::default())],
+                cx,
+            );
+            assert_eq!(resolve_profile(CLAUDE_CODE_PROFILE, cx), Some(claude));
+            assert_eq!(
+                extra_terminal_profile_sections(cx),
+                vec![
+                    (
+                        "OTHCloud".to_string(),
+                        vec![CLAUDE_CODE_PROFILE.to_string()]
+                    ),
+                    ("Other".to_string(), vec!["Other".to_string()]),
+                ]
+            );
+
+            set_extra_terminal_profiles("OTHCloud", Vec::new(), cx);
+            assert_eq!(
+                resolve_profile(CLAUDE_CODE_PROFILE, cx).and_then(|profile| profile.program),
+                Some("claude".to_string())
+            );
+            assert!(resolve_profile("Missing", cx).is_none());
+            assert!(local_terminal_profile_names(cx).contains(&CLAUDE_CODE_PROFILE.to_string()));
+        });
+    }
     use workspace::{MultiWorkspace, WorkspaceId};
 
     #[test]

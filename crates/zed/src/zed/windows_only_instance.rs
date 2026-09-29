@@ -115,7 +115,7 @@ fn send_args_to_instance(args: &Args) -> anyhow::Result<()> {
     }
 
     let (server, server_name) =
-        IpcOneShotServer::<IpcHandshake>::new().context("Handshake before Zed spawn")?;
+        IpcOneShotServer::<IpcHandshake>::new().context("Handshake before OTerminal spawn")?;
     let url = format!("zed-cli://{server_name}");
 
     let request = {
@@ -123,6 +123,13 @@ fn send_args_to_instance(args: &Args) -> anyhow::Result<()> {
         let mut urls = vec![];
         let mut diff_paths = vec![];
         for path in args.paths_or_urls.iter() {
+            // OTHCloud deep links (e.g. `othcloud-terminal://auth?code=...`
+            // launched by the browser) are forwarded verbatim to the running
+            // instance, exactly like `zed://` URLs.
+            if crate::zed::is_othcloud_url(path) {
+                urls.push(path.clone());
+                continue;
+            }
             match std::fs::canonicalize(&path) {
                 Ok(path) => paths.push(path.to_string_lossy().into_owned()),
                 Err(error) => {

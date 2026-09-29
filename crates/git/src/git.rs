@@ -1,11 +1,13 @@
 pub mod blame;
 pub mod commit;
+pub mod credential_override;
 mod hosting_provider;
 mod remote;
 pub mod repository;
 pub mod stash;
 pub mod status;
 
+pub use crate::credential_override::*;
 pub use crate::hosting_provider::*;
 pub use crate::remote::*;
 use anyhow::Result;

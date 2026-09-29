@@ -154,6 +154,10 @@ members = [
     "crates/open_router",
     "crates/openai_subscribed",
     "crates/opencode",
+    "crates/othcloud_client",
+    "crates/othcloud_github",
+    "crates/othcloud_panel",
+    "crates/othcloud_terminal_profiles",
     "crates/outline",
     "crates/outline_panel",
     "crates/path",
@@ -165,6 +169,7 @@ members = [
     "crates/project",
     "crates/project_benchmarks",
     "crates/project_panel",
+    "crates/project_tabs",
     "crates/project_symbols",
     "crates/prompt_store",
     "crates/proto",
@@ -262,6 +267,7 @@ members = [
     #
 
     "tooling/compliance",
+    "tooling/msvc_spectre_libs_stub",
     "tooling/perf",
     "tooling/xtask",
 ]
@@ -423,6 +429,10 @@ open_path_prompt = { path = "crates/open_path_prompt" }
 open_router = { path = "crates/open_router", features = ["schemars"] }
 openai_subscribed = { path = "crates/openai_subscribed" }
 opencode = { path = "crates/opencode" }
+othcloud_client = { path = "crates/othcloud_client" }
+othcloud_github = { path = "crates/othcloud_github" }
+othcloud_panel = { path = "crates/othcloud_panel" }
+othcloud_terminal_profiles = { path = "crates/othcloud_terminal_profiles" }
 outline = { path = "crates/outline" }
 outline_panel = { path = "crates/outline_panel" }
 path = { path = "crates/path" }
@@ -434,6 +444,7 @@ platform_title_bar = { path = "crates/platform_title_bar" }
 prettier = { path = "crates/prettier" }
 project = { path = "crates/project" }
 project_panel = { path = "crates/project_panel" }
+project_tabs = { path = "crates/project_tabs" }
 project_symbols = { path = "crates/project_symbols" }
 prompt_store = { path = "crates/prompt_store" }
 proto = { path = "crates/proto" }
@@ -998,6 +1009,8 @@ features = [
 # the git tree-sitter above; two instances of the crate would make grammar
 # constants type-incompatible with `tree_sitter::Language`.
 tree-sitter-language = { git = "https://github.com/tree-sitter/tree-sitter", rev = "43623ec9bf0eaaf7113285c46e8a09018f181b18" }
+# OTerminal: do not fail the build when the optional VS Spectre libs are missing.
+msvc_spectre_libs = { path = "tooling/msvc_spectre_libs_stub" }
 async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
 async-task = { git = "https://github.com/smol-rs/async-task.git", rev = "b4486cd71e4e94fbda54ce6302444de14f4d190e" }
 windows-capture = { git = "https://github.com/zed-industries/windows-capture.git", rev = "f0d6c1b6691db75461b732f6d5ff56eed002eeb9" }

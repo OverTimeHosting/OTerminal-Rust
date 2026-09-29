@@ -11198,11 +11198,6 @@ dependencies = [
 [[package]]
 name = "msvc_spectre_libs"
 version = "0.1.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29e871a9861f3664f18b7e04e9301d4edd55090c2dadb4b1c602e26ab32b1f5b"
-dependencies = [
- "cc",
-]
 
 [[package]]
 name = "multi_buffer"
@@ -12496,6 +12491,87 @@ checksum = "9aa2b01e1d916879f73a53d01d1d6cee68adbb31d6d9177a8cfce093cced1d50"
 dependencies = [
  "futures-core",
  "pin-project-lite",
+]
+
+[[package]]
+name = "othcloud_client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "db",
+ "futures 0.3.34",
+ "gpui",
+ "http_client",
+ "log",
+ "serde",
+ "serde_json",
+ "urlencoding",
+ "util",
+ "windows-registry 0.6.1",
+ "workspace",
+ "zed_credentials_provider",
+]
+
+[[package]]
+name = "othcloud_github"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "db",
+ "editor",
+ "fs",
+ "futures 0.3.34",
+ "git",
+ "gpui",
+ "http_client",
+ "log",
+ "menu",
+ "notifications",
+ "othcloud_client",
+ "picker",
+ "serde",
+ "serde_json",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
+name = "othcloud_panel"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "db",
+ "editor",
+ "futures 0.3.34",
+ "gpui",
+ "log",
+ "menu",
+ "othcloud_client",
+ "release_channel",
+ "serde",
+ "serde_json",
+ "settings",
+ "ui",
+ "util",
+ "workspace",
+]
+
+[[package]]
+name = "othcloud_terminal_profiles"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+ "log",
+ "othcloud_client",
+ "picker",
+ "terminal",
+ "terminal_view",
+ "ui",
+ "util",
+ "workspace",
 ]
 
 [[package]]
@@ -14136,6 +14212,22 @@ dependencies = [
  "settings",
  "theme",
  "theme_settings",
+ "util",
+ "workspace",
+]
+
+[[package]]
+name = "project_tabs"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "collections",
+ "gpui",
+ "language",
+ "project",
+ "remote_connection",
+ "terminal_view",
+ "ui",
  "util",
  "workspace",
 ]
@@ -18702,6 +18794,7 @@ dependencies = [
  "livekit_client",
  "platform_title_bar",
  "project",
+ "project_tabs",
  "recent_projects",
  "remote",
  "remote_connection",
@@ -22969,6 +23062,10 @@ dependencies = [
  "node_runtime",
  "notifications",
  "onboarding",
+ "othcloud_client",
+ "othcloud_github",
+ "othcloud_panel",
+ "othcloud_terminal_profiles",
  "outline",
  "outline_panel",
  "parking_lot",
@@ -22980,6 +23077,7 @@ dependencies = [
  "project",
  "project_panel",
  "project_symbols",
+ "project_tabs",
  "prompt_store",
  "proto",
  "rayon",

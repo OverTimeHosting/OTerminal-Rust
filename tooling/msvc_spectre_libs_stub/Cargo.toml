@@ -1,0 +1,21 @@
+# OTerminal: local stand-in for the crates.io `msvc_spectre_libs` crate.
+#
+# The upstream build script panics (via its `error` feature, enabled by the
+# `pet` crates) when the Visual Studio "MSVC Spectre-mitigated libs" component
+# is not installed. Those libs are optional for linking, so this stub keeps the
+# same name/features and simply adds the Spectre lib folder to the link search
+# path when it exists, instead of failing the build.
+[package]
+name = "msvc_spectre_libs"
+version = "0.1.3"
+edition = "2021"
+publish = false
+license = "MIT OR Apache-2.0"
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+doctest = false
+
+[features]
+error = []

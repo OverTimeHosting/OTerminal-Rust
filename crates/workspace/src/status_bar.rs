@@ -90,7 +90,7 @@ impl SidebarStatus {
                     open: mw.sidebar_open() && enabled,
                     side: mw.sidebar_side(cx),
                     has_notifications: mw.sidebar_has_notifications(cx),
-                    show_toggle: enabled,
+                    show_toggle: enabled && mw.has_sidebar(),
                 }
             })
             .unwrap_or_default()

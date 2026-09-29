@@ -206,6 +206,11 @@ fn main() {
 
         println!("cargo:rerun-if-env-changed=RELEASE_CHANNEL");
         println!("cargo:rerun-if-env-changed=GITHUB_RUN_NUMBER");
+        // Re-embed the OTerminal app icons into oterminal.exe when they change.
+        println!("cargo:rerun-if-changed=resources/windows/app-icon.ico");
+        println!("cargo:rerun-if-changed=resources/windows/app-icon-dev.ico");
+        println!("cargo:rerun-if-changed=resources/windows/app-icon-nightly.ico");
+        println!("cargo:rerun-if-changed=resources/windows/app-icon-preview.ico");
 
         #[cfg(windows)]
         {

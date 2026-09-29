@@ -15,7 +15,11 @@ pub const EDITORCONFIG_NAME: &str = ".editorconfig";
 /// and state directory paths.
 ///
 /// Forks should change this to avoid colliding with Zed's user data.
-pub const APP_NAME: &str = "Zed";
+///
+/// OTerminal stores its data in `%APPDATA%\OTerminal` / `%LOCALAPPDATA%\OTerminal`
+/// on Windows, `~/.config/oterminal` on Linux and
+/// `~/Library/Application Support/OTerminal` on macOS.
+pub const APP_NAME: &str = "OTerminal";
 
 /// Lowercased form of [`APP_NAME`], for use in XDG-style paths on
 /// Linux/FreeBSD and the macOS `~/.config` fallback.
@@ -66,6 +70,8 @@ static CURRENT_DATA_DIR: OnceLock<PathBuf> = OnceLock::new();
 static CONFIG_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 /// Returns the relative path to the zed_server directory on the ssh host.
+///
+/// OTerminal keeps `.zed_server` unchanged for remote-server compatibility.
 pub fn remote_server_dir_relative() -> &'static RelPath {
     static CACHED: LazyLock<&'static RelPath> =
         LazyLock::new(|| RelPath::from_unix_str(".zed_server").unwrap());
@@ -484,6 +490,9 @@ pub fn devcontainer_dir() -> &'static PathBuf {
 }
 
 /// Returns the relative path to a `.zed` folder within a project.
+///
+/// OTerminal intentionally keeps the `.zed` name so project settings and
+/// tasks stay compatible with Zed and with remote servers.
 pub fn local_settings_folder_name() -> &'static str {
     ".zed"
 }

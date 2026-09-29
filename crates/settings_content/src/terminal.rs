@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use collections::HashMap;
+use collections::{HashMap, IndexMap};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use settings_macros::{MergeFrom, with_fallible_options};
@@ -193,6 +193,39 @@ pub struct TerminalSettingsContent {
     ///
     /// Default: "system"
     pub bell: Option<TerminalBell>,
+    /// Named terminal profiles shown in the terminal panel's "new terminal" menu.
+    ///
+    /// Each profile runs a specific program with arguments, environment and
+    /// working directory, e.g. `{ "Claude Code": { "program": "claude" } }`.
+    ///
+    /// Default: {}
+    pub profiles: Option<IndexMap<String, TerminalProfileContent>>,
+    /// The name of the profile used for new terminals. When unset, new
+    /// terminals use the `shell` setting.
+    ///
+    /// Default: null
+    pub default_profile: Option<String>,
+}
+
+/// A named terminal profile.
+#[with_fallible_options]
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema, MergeFrom, PartialEq)]
+pub struct TerminalProfileContent {
+    /// The program to run. When unset, the configured shell is used.
+    pub program: Option<String>,
+    /// Arguments passed to the program.
+    pub args: Option<Vec<String>>,
+    /// Extra environment variables for the terminal.
+    pub env: Option<HashMap<String, String>>,
+    /// The working directory to start in. This value will be shell expanded.
+    /// When unset, the `working_directory` setting is used.
+    pub working_directory: Option<String>,
+    /// An optional icon name for the profile.
+    pub icon: Option<String>,
+    /// Restrict the profile to a platform: "windows", "macos", "linux" or "all".
+    ///
+    /// Default: all
+    pub platform: Option<String>,
 }
 
 crate::fallible_options::flattened_deserialize!(TerminalSettingsContent {
@@ -202,7 +235,7 @@ crate::fallible_options::flattened_deserialize!(TerminalSettingsContent {
         cursor_shape, blinking, alternate_scroll, option_as_meta, copy_on_select,
         keep_selection_on_copy, open_links_in_mouse_mode, button, dock, starts_open, flexible,
         default_width, default_height, max_scroll_history_lines, scroll_multiplier, toolbar,
-        scrollbar, minimum_contrast, show_count_badge, bell,
+        scrollbar, minimum_contrast, show_count_badge, bell, profiles, default_profile,
     },
     defaults: {},
 });

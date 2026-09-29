@@ -651,14 +651,16 @@ const DEBUG_TERMINAL_HEIGHT: Pixels = px(30.);
 const DEBUG_CELL_WIDTH: Pixels = px(5.);
 const DEBUG_LINE_HEIGHT: Pixels = px(5.);
 
-/// Inserts Zed-specific environment variables for terminal sessions.
+/// Inserts OTerminal-specific (Zed-compatible) environment variables for terminal sessions.
 /// Used by both local terminals and remote terminals (via SSH).
 pub fn insert_zed_terminal_env(
     env: &mut HashMap<String, String>,
     version: &impl std::fmt::Display,
 ) {
+    // Kept for compatibility with tools that detect Zed's integrated terminal.
     env.insert("ZED_TERM".to_string(), "true".to_string());
-    env.insert("TERM_PROGRAM".to_string(), "zed".to_string());
+    env.insert("OTERMINAL".to_string(), "1".to_string());
+    env.insert("TERM_PROGRAM".to_string(), "OTerminal".to_string());
     env.insert("TERM".to_string(), "xterm-256color".to_string());
     env.insert("COLORTERM".to_string(), "truecolor".to_string());
     env.insert("TERM_PROGRAM_VERSION".to_string(), version.to_string());
@@ -1467,7 +1469,7 @@ impl TerminalBuilder {
     #[cfg(windows)]
     fn resolve_path(path: &str) -> Result<String> {
         use windows::Win32::Storage::FileSystem::SearchPathW;
-        use windows::core::HSTRING;
+        use windows::core::{HSTRING, PCWSTR};
 
         let path = if path.starts_with(r"\\?\") || !path.contains(&['/', '\\']) {
             path.to_string()
@@ -1475,11 +1477,36 @@ impl TerminalBuilder {
             r"\\?\".to_string() + path
         };
 
-        let required_length = unsafe { SearchPathW(None, &HSTRING::from(&path), None, None, None) };
-        let mut buf = vec![0u16; required_length as usize];
-        let size = unsafe { SearchPathW(None, &HSTRING::from(&path), None, Some(&mut buf), None) };
+        let search = |extension: Option<&str>| -> Option<String> {
+            let file_name = HSTRING::from(&path);
+            let extension = extension.map(HSTRING::from);
+            let extension = extension
+                .as_ref()
+                .map_or(PCWSTR::null(), |extension| PCWSTR(extension.as_ptr()));
+            let required_length = unsafe { SearchPathW(None, &file_name, extension, None, None) };
+            if required_length == 0 {
+                return None;
+            }
+            let mut buf = vec![0u16; required_length as usize];
+            let size = unsafe { SearchPathW(None, &file_name, extension, Some(&mut buf), None) };
+            if size == 0 || size as usize > buf.len() {
+                return None;
+            }
+            String::from_utf16(&buf[..size as usize]).ok()
+        };
 
-        Ok(String::from_utf16(&buf[..size as usize])?)
+        // SearchPathW only appends an extension when one is given. For bare
+        // program names such as `claude` or `pwsh`, prefer real executables over
+        // extensionless files (npm installs a POSIX `claude` shim next to `claude.cmd`).
+        let resolved = if std::path::Path::new(&path).extension().is_none() {
+            [".exe", ".com", ".cmd", ".bat"]
+                .into_iter()
+                .find_map(|extension| search(Some(extension)))
+                .or_else(|| search(None))
+        } else {
+            search(None)
+        };
+        resolved.ok_or_else(|| anyhow::anyhow!("could not find `{path}` on PATH"))
     }
 }
 

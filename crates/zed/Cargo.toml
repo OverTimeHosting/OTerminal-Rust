@@ -1,12 +1,12 @@
 [package]
-description = "The fast, collaborative code editor."
+description = "OTerminal - a fast terminal and code editor for OTHCloud"
 edition.workspace = true
 name = "zed"
 version = "1.21.0"
 publish.workspace = true
 license = "GPL-3.0-or-later"
-authors = ["Zed Team <hi@zed.dev>"]
-default-run = "zed"
+authors = ["OverTime Hosting"]
+default-run = "oterminal"
 
 [lints]
 workspace = true
@@ -54,7 +54,7 @@ visual-tests = [
 ]
 
 [[bin]]
-name = "zed"
+name = "oterminal"
 path = "src/main.rs"
 
 [[bin]]
@@ -168,6 +168,10 @@ miniprofiler_ui.workspace = true
 node_runtime.workspace = true
 notifications.workspace = true
 onboarding.workspace = true
+othcloud_client.workspace = true
+othcloud_github.workspace = true
+othcloud_panel.workspace = true
+othcloud_terminal_profiles.workspace = true
 outline.workspace = true
 outline_panel.workspace = true
 parking_lot.workspace = true
@@ -176,6 +180,7 @@ picker.workspace = true
 profiling.workspace = true
 project.workspace = true
 project_panel.workspace = true
+project_tabs.workspace = true
 project_symbols.workspace = true
 prompt_store.workspace = true
 proto.workspace = true
@@ -280,35 +285,35 @@ repl = { workspace = true, features = ["test-support"] }
 
 [package.metadata.bundle-dev]
 icon = ["resources/app-icon-dev@2x.png", "resources/app-icon-dev.png"]
-identifier = "dev.zed.Zed-Dev"
-name = "Zed Dev"
+identifier = "com.othcloud.oterminal.dev"
+name = "OTerminal Dev"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["zed"]
+osx_url_schemes = ["othcloud-terminal"]
 
 [package.metadata.bundle-nightly]
 icon = ["resources/app-icon-nightly@2x.png", "resources/app-icon-nightly.png"]
-identifier = "dev.zed.Zed-Nightly"
-name = "Zed Nightly"
+identifier = "com.othcloud.oterminal.nightly"
+name = "OTerminal Nightly"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["zed"]
+osx_url_schemes = ["othcloud-terminal"]
 
 [package.metadata.bundle-preview]
 icon = ["resources/app-icon-preview@2x.png", "resources/app-icon-preview.png"]
-identifier = "dev.zed.Zed-Preview"
-name = "Zed Preview"
+identifier = "com.othcloud.oterminal.preview"
+name = "OTerminal Preview"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["zed"]
+osx_url_schemes = ["othcloud-terminal"]
 
 [package.metadata.bundle-stable]
 icon = ["resources/app-icon@2x.png", "resources/app-icon.png"]
-identifier = "dev.zed.Zed"
-name = "Zed"
+identifier = "com.othcloud.oterminal"
+name = "OTerminal"
 osx_minimum_system_version = "10.15.7"
 osx_info_plist_exts = ["resources/info/*"]
-osx_url_schemes = ["zed"]
+osx_url_schemes = ["othcloud-terminal"]
 
 [package.metadata.cargo-shear]
 ignored = ["profiling", "tracing"]

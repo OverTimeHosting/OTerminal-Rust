@@ -1,4 +1,4 @@
-use collections::HashMap;
+use collections::{HashMap, IndexMap};
 use gpui::{FontFallbacks, FontFeatures, FontWeight, Pixels};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -52,6 +52,10 @@ pub struct TerminalSettings {
     pub path_hyperlink_timeout_ms: u64,
     pub show_count_badge: bool,
     pub bell: TerminalBell,
+    /// Named terminal profiles from settings, filtered to the current platform.
+    pub profiles: IndexMap<String, TerminalProfile>,
+    /// The profile used for new terminals, if any.
+    pub default_profile: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
@@ -60,6 +64,61 @@ pub struct ScrollbarSettings {
     ///
     /// Default: inherits editor scrollbar settings
     pub show: Option<ShowScrollbar>,
+}
+
+/// A resolved terminal profile: a named program launch configuration.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TerminalProfile {
+    /// The program to run. `None` means the configured shell.
+    pub program: Option<String>,
+    pub args: Vec<String>,
+    pub env: HashMap<String, String>,
+    pub working_directory: Option<String>,
+    pub icon: Option<String>,
+}
+
+impl From<settings::TerminalProfileContent> for TerminalProfile {
+    fn from(content: settings::TerminalProfileContent) -> Self {
+        Self {
+            program: content.program.filter(|program| !program.trim().is_empty()),
+            args: content.args.unwrap_or_default(),
+            env: content.env.unwrap_or_default(),
+            working_directory: content
+                .working_directory
+                .filter(|directory| !directory.trim().is_empty()),
+            icon: content.icon,
+        }
+    }
+}
+
+/// The platform name used by terminal profiles: "windows", "macos" or "linux".
+pub fn current_profile_platform() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "windows"
+    } else if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    }
+}
+
+/// Whether a profile restricted to `platform` should be offered on this OS.
+/// `None`, `""` and `"all"` match every platform; "darwin"/"mac"/"osx" are
+/// accepted as aliases for macOS and "win32"/"win" for Windows.
+pub fn profile_applies_to_current_platform(platform: Option<&str>) -> bool {
+    let Some(platform) = platform.map(|p| p.trim().to_ascii_lowercase()) else {
+        return true;
+    };
+    let normalized = match platform.as_str() {
+        "" | "all" | "any" | "*" => return true,
+        "win" | "win32" | "win64" | "windows" => "windows",
+        "mac" | "osx" | "darwin" | "macos" => "macos",
+        "unix" | "posix" => return !cfg!(target_os = "windows"),
+        "linux" | "freebsd" => "linux",
+        other => other,
+    };
+    normalized == current_profile_platform()
 }
 
 fn settings_shell_to_task_shell(shell: settings::Shell) -> Shell {
@@ -136,6 +195,16 @@ impl settings::Settings for TerminalSettings {
             path_hyperlink_timeout_ms: project_content.path_hyperlink_timeout_ms.unwrap(),
             show_count_badge: user_content.show_count_badge.unwrap(),
             bell: user_content.bell.unwrap(),
+            profiles: user_content
+                .profiles
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(_, profile)| {
+                    profile_applies_to_current_platform(profile.platform.as_deref())
+                })
+                .map(|(name, profile)| (name, TerminalProfile::from(profile)))
+                .collect(),
+            default_profile: user_content.default_profile,
         }
     }
 }
@@ -162,5 +231,29 @@ impl From<settings::CursorShapeContent> for CursorShape {
             settings::CursorShapeContent::Bar => CursorShape::Bar,
             settings::CursorShapeContent::Hollow => CursorShape::Hollow,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn profile_platform_filter() {
+        assert!(profile_applies_to_current_platform(None));
+        assert!(profile_applies_to_current_platform(Some("all")));
+        assert!(profile_applies_to_current_platform(Some("")));
+        assert!(profile_applies_to_current_platform(Some(
+            current_profile_platform()
+        )));
+        let (other, alias) = if cfg!(target_os = "windows") {
+            ("linux", "win32")
+        } else if cfg!(target_os = "macos") {
+            ("windows", "osx")
+        } else {
+            ("osx", "linux")
+        };
+        assert!(!profile_applies_to_current_platform(Some(other)));
+        assert!(profile_applies_to_current_platform(Some(alias)));
     }
 }

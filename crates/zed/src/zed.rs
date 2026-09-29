@@ -76,7 +76,6 @@ use settings::{
     SettingsFile, SettingsStore, VIM_KEYMAP_PATH, initial_local_debug_tasks_content,
     initial_project_settings_content, initial_tasks_content, update_settings_file,
 };
-use sidebar::Sidebar;
 #[cfg(debug_assertions)]
 use workspace::workspace_error::{ErrorAction, ErrorSeverity, WorkspaceError};
 
@@ -499,7 +498,6 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
                 .unwrap_or(true)
         });
 
-        let window_handle = window.window_handle();
         let multi_workspace_handle = cx.entity();
         cx.subscribe_in(
             &multi_workspace_handle,
@@ -532,18 +530,6 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             },
         )
         .detach();
-
-        cx.defer(move |cx| {
-            window_handle
-                .update(cx, |_, window, cx| {
-                    let sidebar =
-                        cx.new(|cx| Sidebar::new(multi_workspace_handle.clone(), window, cx));
-                    multi_workspace_handle.update(cx, |multi_workspace, cx| {
-                        multi_workspace.register_sidebar(sidebar, cx);
-                    });
-                })
-                .ok();
-        });
     })
     .detach();
 
@@ -628,6 +614,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
         let line_ending_indicator =
             cx.new(|_| line_ending_selector::LineEndingIndicator::default());
         let git_blame_status = cx.new(|_| git_ui::GitBlameStatus::default());
+        let othcloud_status = cx.new(othcloud_panel::OthcloudStatusItem::new);
         let merge_conflict_indicator =
             cx.new(|cx| git_ui::MergeConflictIndicator::new(workspace, cx));
         workspace.status_bar().update(cx, |status_bar, cx| {
@@ -638,6 +625,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             status_bar.add_left_item(git_blame_status, window, cx);
             status_bar.add_left_item(merge_conflict_indicator, window, cx);
             status_bar.add_left_item(activity_indicator, window, cx);
+            status_bar.add_right_item(othcloud_status, window, cx);
             status_bar.add_right_item(edit_prediction_ui, window, cx);
             status_bar.add_right_item(active_buffer_encoding, window, cx);
             status_bar.add_right_item(active_buffer_language, window, cx);
@@ -779,8 +767,8 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
         let outline_panel = OutlinePanel::load(workspace_handle.clone(), cx.clone());
         let terminal_panel = TerminalPanel::load(workspace_handle.clone(), cx.clone());
         let git_panel = GitPanel::load(workspace_handle.clone(), cx.clone());
-        let channels_panel =
-            collab_ui::collab_panel::CollabPanel::load(workspace_handle.clone(), cx.clone());
+        let othcloud_panel =
+            othcloud_panel::OthcloudPanel::load(workspace_handle.clone(), cx.clone());
         let debug_panel = DebugPanel::load(workspace_handle.clone(), cx);
 
         async fn add_panel_when_ready(
@@ -803,7 +791,7 @@ fn initialize_panels(window: &mut Window, cx: &mut Context<Workspace>) -> Task<a
             add_panel_when_ready(outline_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(terminal_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(git_panel, workspace_handle.clone(), cx.clone()),
-            add_panel_when_ready(channels_panel, workspace_handle.clone(), cx.clone()),
+            add_panel_when_ready(othcloud_panel, workspace_handle.clone(), cx.clone()),
             add_panel_when_ready(debug_panel, workspace_handle.clone(), cx.clone()),
             initialize_agent_panel(workspace_handle.clone(), cx.clone()).map(|r| r.log_err()),
         );
@@ -1714,7 +1702,7 @@ fn open_about_window(cx: &mut App) {
     cx.open_window(
         WindowOptions {
             titlebar: Some(TitlebarOptions {
-                title: Some("About Zed".into()),
+                title: Some("About OTerminal".into()),
                 appears_transparent: true,
                 traffic_light_position: Some(point(px(12.), px(12.))),
             }),
@@ -6015,7 +6003,7 @@ mod tests {
         for theme_name in themes.list().into_iter().map(|meta| meta.name) {
             let theme = themes.get(&theme_name).unwrap();
             assert_eq!(theme.name, theme_name);
-            if theme.name.as_ref() == "One Dark" {
+            if theme.name.as_ref() == "OTHCloud Dark" {
                 has_default_theme = true;
             }
         }

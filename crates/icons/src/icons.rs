@@ -201,6 +201,7 @@ pub enum IconName {
     Notepad,
     OnCall,
     Option,
+    Othcloud,
     PageDown,
     PageUp,
     Paperclip,

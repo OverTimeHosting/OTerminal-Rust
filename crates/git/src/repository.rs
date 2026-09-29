@@ -3994,6 +3994,10 @@ impl GitBinary {
         if !self.is_trusted {
             command.args(["-c", "core.hooksPath=/dev/null"]);
             command.args(["-c", "core.sshCommand=ssh"]);
+            // Command-line `-c` config takes precedence over `GIT_CONFIG_*`
+            // environment entries and an empty value resets the helper list,
+            // so credentials injected via `credential_override` (OTHCloud
+            // GitHub tokens) are deliberately never handed to untrusted repos.
             command.args(["-c", "credential.helper="]);
             command.args(["-c", "protocol.ext.allow=never"]);
             command.args(["-c", "diff.external="]);
@@ -4036,7 +4040,25 @@ async fn run_git_command(
     mut command: util::command::Command,
     executor: BackgroundExecutor,
 ) -> Result<RemoteCommandOutput> {
+    // Credentials injected by the application (e.g. OTHCloud's GitHub token).
+    // Config entries are appended after any `GIT_CONFIG_COUNT` the command
+    // environment already has, so user-provided entries are preserved.
+    let mut extra_env: Vec<(String, String)> = Vec::new();
+    if let Some(count) = env
+        .get("GIT_CONFIG_COUNT")
+        .cloned()
+        .or_else(|| std::env::var("GIT_CONFIG_COUNT").ok())
+    {
+        extra_env.push(("GIT_CONFIG_COUNT".to_string(), count));
+    }
+    extra_env.extend(crate::credential_override::git_credential_plain_env());
+    crate::credential_override::merge_git_config_env(
+        &mut extra_env,
+        &crate::credential_override::git_credential_config_entries(),
+    );
+
     if env.contains_key("GIT_ASKPASS") {
+        command.envs(extra_env);
         let git_process = command.spawn()?;
         let output = git_process.output().await?;
         anyhow::ensure!(
@@ -4055,14 +4077,16 @@ async fn run_git_command(
             .env("SSH_ASKPASS", ask_pass.script_path())
             .env("SSH_ASKPASS_REQUIRE", "force");
 
-        if !env.contains_key("GIT_CONFIG_COUNT")
-            && let Some(gpg_wrapper) = ask_pass.gpg_wrapper_path()
-        {
-            command
-                .env("GIT_CONFIG_COUNT", "1")
-                .env("GIT_CONFIG_KEY_0", "gpg.program")
-                .env("GIT_CONFIG_VALUE_0", gpg_wrapper);
+        if let Some(gpg_wrapper) = ask_pass.gpg_wrapper_path() {
+            crate::credential_override::merge_git_config_env(
+                &mut extra_env,
+                &[(
+                    "gpg.program".to_string(),
+                    gpg_wrapper.to_string_lossy().into_owned(),
+                )],
+            );
         }
+        command.envs(extra_env);
 
         #[cfg(target_os = "windows")]
         command.env("ZED_ASKPASS_SOCKET", ask_pass.socket_path());
