@@ -2,6 +2,9 @@ use std::path::PathBuf;
 
 use super::*;
 use crate::item::test::TestItem;
+use crate::persistence::model::{
+    SerializedProjectGroup, SerializedProjectWindow, SerializedProjectWindowBounds,
+};
 use client::proto;
 use fs::{FakeFs, Fs};
 use gpui::{TestAppContext, VisualTestContext};
@@ -1668,4 +1671,431 @@ async fn test_nearest_retained_workspace_skips_disconnected_workspace(cx: &mut T
             "a disconnected workspace should not be selected as a fallback"
         );
     });
+}
+
+// OTerminal: project windows.
+
+fn init_project_window_test(cx: &mut TestAppContext) {
+    init_test(cx);
+    cx.update(|cx| cx.set_global(db::AppDatabase::test_new()));
+}
+
+fn is_window_hidden(window: WindowHandle<MultiWorkspace>, cx: &mut VisualTestContext) -> bool {
+    window
+        .update(cx, |_, window, _| window.is_window_hidden())
+        .expect("the project window is open")
+}
+
+fn is_window_open(window: WindowHandle<MultiWorkspace>, cx: &mut VisualTestContext) -> bool {
+    cx.update(|_, cx| {
+        cx.windows()
+            .iter()
+            .any(|open| open.window_id() == window.window_id())
+    })
+}
+
+async fn two_project_setup(
+    cx: &mut TestAppContext,
+) -> (
+    Entity<Project>,
+    ProjectGroupKey,
+    ProjectGroupKey,
+    Entity<MultiWorkspace>,
+    &mut VisualTestContext,
+) {
+    init_project_window_test(cx);
+    let fs = FakeFs::new(cx.executor());
+    fs.insert_tree("/root_a", json!({ "file_a.txt": "" })).await;
+    fs.insert_tree("/root_b", json!({ "file_b.txt": "" })).await;
+    let project_a = Project::test(fs.clone(), ["/root_a".as_ref()], cx).await;
+    let project_b = Project::test(fs, ["/root_b".as_ref()], cx).await;
+    let key_a = project_a.read_with(cx, |project, cx| project.project_group_key(cx));
+    let key_b = project_b.read_with(cx, |project, cx| project.project_group_key(cx));
+    let (multi_workspace, cx) = setup_multi_workspace(&[project_a.clone(), project_b], cx);
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        assert!(mw.activate_project_group(&key_a, window, cx));
+    });
+    cx.run_until_parked();
+    (project_a, key_a, key_b, multi_workspace, cx)
+}
+
+#[gpui::test]
+async fn test_project_windows_follow_their_project_tab(cx: &mut TestAppContext) {
+    let (project_a, key_a, key_b, multi_workspace, cx) = two_project_setup(cx).await;
+    let owner_id = cx.update(|window, _| window.window_handle().window_id());
+
+    let project_window = multi_workspace
+        .update_in(cx, |mw, window, cx| mw.open_project_window(window, cx))
+        .expect("opening a project window");
+    cx.run_until_parked();
+
+    // The new window shows the same project, in its own workspace.
+    let project_window_workspace = project_window
+        .read_with(cx, |pw, cx| {
+            assert!(pw.is_project_window());
+            assert_eq!(
+                pw.project_window_owner()
+                    .map(|owner| owner.window().window_id()),
+                Some(owner_id)
+            );
+            assert_eq!(
+                pw.workspace().read(cx).project().entity_id(),
+                project_a.entity_id(),
+                "the project window shares the tab's project"
+            );
+            pw.workspace().clone()
+        })
+        .unwrap();
+    multi_workspace.read_with(cx, |mw, cx| {
+        assert_ne!(
+            mw.workspace().entity_id(),
+            project_window_workspace.entity_id()
+        );
+        assert_eq!(
+            mw.project_windows_for_group(&key_a, cx),
+            vec![project_window]
+        );
+        assert!(mw.project_windows_for_group(&key_b, cx).is_empty());
+        assert_eq!(mw.project_group_keys().len(), 2, "no extra tab is created");
+    });
+    assert!(!is_window_hidden(project_window, cx));
+
+    // Content of the project window, to check it survives being hidden.
+    let dirty_item = cx.new(|cx| TestItem::new(cx).with_dirty(true));
+    project_window
+        .update(cx, |_, window, cx| {
+            project_window_workspace.update(cx, |workspace, cx| {
+                workspace.add_item_to_active_pane(
+                    Box::new(dirty_item.clone()),
+                    None,
+                    true,
+                    window,
+                    cx,
+                );
+            });
+        })
+        .unwrap();
+
+    // Switching the main window to another tab hides the project window...
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        assert!(mw.activate_project_group(&key_b, window, cx));
+    });
+    cx.run_until_parked();
+    assert!(is_window_hidden(project_window, cx));
+
+    // ...and switching back shows it again, exactly as it was.
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        assert!(mw.activate_project_group(&key_a, window, cx));
+    });
+    cx.run_until_parked();
+    assert!(!is_window_hidden(project_window, cx));
+    project_window
+        .read_with(cx, |pw, cx| {
+            assert_eq!(
+                pw.workspace().entity_id(),
+                project_window_workspace.entity_id()
+            );
+            assert!(
+                pw.workspace()
+                    .read(cx)
+                    .items(cx)
+                    .any(|item| item.item_id() == dirty_item.entity_id() && item.is_dirty(cx))
+            );
+        })
+        .unwrap();
+
+    // A window opened from the project window belongs to the main window too.
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    let second_window = project_window
+        .update(cx, |pw, window, cx| pw.open_project_window(window, cx))
+        .unwrap()
+        .expect("opening a second project window");
+    cx.run_until_parked();
+    multi_workspace.read_with(cx, |mw, cx| {
+        assert_eq!(
+            mw.project_windows_for_group(&key_a, cx),
+            vec![project_window, second_window]
+        );
+    });
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        assert!(mw.activate_project_group(&key_b, window, cx));
+    });
+    cx.run_until_parked();
+    assert!(is_window_hidden(project_window, cx));
+    assert!(is_window_hidden(second_window, cx));
+
+    // The project windows are remembered with the main window's state.
+    multi_workspace.update(cx, |mw, cx| {
+        let serialized = mw.serialized_project_windows(cx);
+        assert_eq!(serialized.len(), 2);
+        assert!(
+            serialized
+                .iter()
+                .all(|window| ProjectGroupKey::from(window.project_group.clone()) == key_a)
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_project_window_closes_on_its_own(cx: &mut TestAppContext) {
+    let (_project_a, key_a, _key_b, multi_workspace, cx) = two_project_setup(cx).await;
+    let project_window = multi_workspace
+        .update_in(cx, |mw, window, cx| mw.open_project_window(window, cx))
+        .unwrap();
+    cx.run_until_parked();
+
+    project_window
+        .update(cx, |_, window, _| window.remove_window())
+        .unwrap();
+    cx.run_until_parked();
+    multi_workspace.read_with(cx, |mw, cx| {
+        assert!(mw.project_windows_for_group(&key_a, cx).is_empty());
+        assert!(mw.serialized_project_windows(cx).is_empty());
+        assert_eq!(mw.project_group_keys().len(), 2);
+    });
+}
+
+#[gpui::test]
+async fn test_closing_project_tab_closes_its_windows(cx: &mut TestAppContext) {
+    let (_project_a, key_a, key_b, multi_workspace, cx) = two_project_setup(cx).await;
+    let project_window = multi_workspace
+        .update_in(cx, |mw, window, cx| mw.open_project_window(window, cx))
+        .unwrap();
+    cx.run_until_parked();
+
+    // Close the tab while it is in the background (its window hidden).
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        assert!(mw.activate_project_group(&key_b, window, cx));
+    });
+    cx.run_until_parked();
+    assert!(is_window_hidden(project_window, cx));
+
+    let task = multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.remove_project_group(&key_a, window, cx)
+    });
+    cx.run_until_parked();
+    assert!(task.await.unwrap());
+    assert!(!is_window_open(project_window, cx));
+    multi_workspace.read_with(cx, |mw, _| {
+        assert_eq!(mw.project_group_keys(), vec![key_b.clone()]);
+    });
+}
+
+#[gpui::test]
+async fn test_project_window_prompt_shows_hidden_window(cx: &mut TestAppContext) {
+    let (_project_a, key_a, key_b, multi_workspace, cx) = two_project_setup(cx).await;
+    let project_window = multi_workspace
+        .update_in(cx, |mw, window, cx| mw.open_project_window(window, cx))
+        .unwrap();
+    cx.run_until_parked();
+    let dirty_item = cx.new(|cx| {
+        TestItem::new(cx)
+            .with_dirty(true)
+            .with_project_items(&[crate::item::test::TestProjectItem::new(1, "1.txt", cx)])
+    });
+    project_window
+        .update(cx, |pw, window, cx| {
+            pw.workspace().clone().update(cx, |workspace, cx| {
+                workspace.add_item_to_active_pane(Box::new(dirty_item), None, true, window, cx);
+            });
+        })
+        .unwrap();
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        assert!(mw.activate_project_group(&key_b, window, cx));
+    });
+    cx.run_until_parked();
+    assert!(is_window_hidden(project_window, cx));
+
+    // Closing the tab has to ask about the unsaved item in the hidden
+    // window, so the window is shown for the prompt.
+    let task = multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.remove_project_group(&key_a, window, cx)
+    });
+    cx.run_until_parked();
+    assert!(cx.has_pending_prompt());
+    assert!(!is_window_hidden(project_window, cx));
+    cx.simulate_prompt_answer("Cancel");
+    cx.run_until_parked();
+    assert!(!task.await.unwrap());
+    assert!(is_window_open(project_window, cx));
+    multi_workspace.read_with(cx, |mw, cx| {
+        assert_eq!(mw.project_group_keys().len(), 2, "cancelling keeps the tab");
+        assert_eq!(
+            mw.project_windows_for_group(&key_a, cx),
+            vec![project_window]
+        );
+    });
+}
+
+#[gpui::test]
+async fn test_closing_main_window_closes_project_windows(cx: &mut TestAppContext) {
+    let (_project_a, _key_a, key_b, multi_workspace, cx) = two_project_setup(cx).await;
+    let project_window = multi_workspace
+        .update_in(cx, |mw, window, cx| mw.open_project_window(window, cx))
+        .unwrap();
+    cx.run_until_parked();
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        assert!(mw.activate_project_group(&key_b, window, cx));
+    });
+    cx.run_until_parked();
+    assert!(is_window_hidden(project_window, cx));
+
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        mw.close_window(&CloseWindow, window, cx);
+    });
+    cx.run_until_parked();
+    let remaining_windows = cx.cx.update(|cx| cx.windows().len());
+    assert_eq!(remaining_windows, 0, "no hidden window is left behind");
+}
+
+#[gpui::test]
+async fn test_restored_project_windows_open_with_their_tab(cx: &mut TestAppContext) {
+    let (_project_a, key_a, key_b, multi_workspace, cx) = two_project_setup(cx).await;
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        assert!(mw.activate_project_group(&key_b, window, cx));
+    });
+    cx.run_until_parked();
+
+    let restored = SerializedProjectWindow {
+        version: SerializedProjectWindow::CURRENT_VERSION,
+        project_group: SerializedProjectGroup::from_group(&key_a, true),
+        bounds: Some(SerializedProjectWindowBounds {
+            maximized: false,
+            fullscreen: false,
+            x: 10.,
+            y: 20.,
+            width: 800.,
+            height: 600.,
+        }),
+        display: None,
+        open_paths: Vec::new(),
+    };
+    multi_workspace.update(cx, |mw, cx| {
+        mw.restore_project_windows(vec![restored], cx);
+    });
+    cx.run_until_parked();
+    multi_workspace.read_with(cx, |mw, cx| {
+        assert!(
+            mw.project_windows_for_group(&key_a, cx).is_empty(),
+            "a background tab's windows open when the tab is shown"
+        );
+        assert_eq!(
+            mw.serialized_project_windows(cx).len(),
+            1,
+            "but are remembered"
+        );
+    });
+
+    multi_workspace.update_in(cx, |mw, window, cx| {
+        assert!(mw.activate_project_group(&key_a, window, cx));
+    });
+    cx.run_until_parked();
+    let windows = multi_workspace.read_with(cx, |mw, cx| mw.project_windows_for_group(&key_a, cx));
+    assert_eq!(windows.len(), 1);
+    assert!(!is_window_hidden(windows[0], cx));
+    multi_workspace.read_with(cx, |mw, cx| {
+        let serialized = mw.serialized_project_windows(cx);
+        assert_eq!(serialized.len(), 1);
+        assert_eq!(
+            serialized[0].version,
+            SerializedProjectWindow::CURRENT_VERSION
+        );
+    });
+    // The restored window opens behind the window the user is looking at.
+    let owner_id = multi_workspace.update_in(cx, |_, window, _| window.window_handle().window_id());
+    assert_eq!(
+        cx.cx
+            .update(|cx| cx.active_window().map(|window| window.window_id())),
+        Some(owner_id)
+    );
+}
+
+// Regression: windows are created with `show: false` and must be revealed by
+// activating them, or "New Window for This Project" appears to do nothing.
+#[gpui::test]
+async fn test_new_project_window_is_revealed_and_focused(cx: &mut TestAppContext) {
+    let (_project_a, _key_a, _key_b, multi_workspace, cx) = two_project_setup(cx).await;
+    let project_window = multi_workspace
+        .update_in(cx, |mw, window, cx| mw.open_project_window(window, cx))
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(
+        cx.cx
+            .update(|cx| cx.active_window().map(|window| window.window_id())),
+        Some(project_window.window_id())
+    );
+    assert!(!is_window_hidden(project_window, cx));
+}
+
+// Regression: the shortcut, still held (or auto-repeating) when the new window
+// takes focus, must not open a second window.
+#[gpui::test]
+async fn test_repeated_new_project_window_requests_open_one_window(cx: &mut TestAppContext) {
+    let (_project_a, key_a, _key_b, multi_workspace, cx) = two_project_setup(cx).await;
+    let first = multi_workspace
+        .update_in(cx, |mw, window, cx| mw.open_project_window(window, cx))
+        .unwrap();
+    cx.run_until_parked();
+    // The repeat arrives in the new, now focused, project window.
+    let repeat = first
+        .update(cx, |pw, window, cx| pw.open_project_window(window, cx))
+        .unwrap()
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(repeat, first);
+    multi_workspace.read_with(cx, |mw, cx| {
+        assert_eq!(mw.project_windows_for_group(&key_a, cx), vec![first]);
+    });
+
+    // A deliberate second request later opens a second window.
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(1));
+    let second = multi_workspace
+        .update_in(cx, |mw, window, cx| mw.open_project_window(window, cx))
+        .unwrap();
+    cx.run_until_parked();
+    assert_ne!(second, first);
+    multi_workspace.read_with(cx, |mw, cx| {
+        assert_eq!(mw.project_windows_for_group(&key_a, cx).len(), 2);
+    });
+}
+
+// Regression: entries persisted by the build that left project windows
+// invisible (no version) must not be resurrected, and a runaway list is capped.
+#[gpui::test]
+async fn test_invalid_persisted_project_windows_are_dropped(cx: &mut TestAppContext) {
+    let (_project_a, key_a, _key_b, multi_workspace, cx) = two_project_setup(cx).await;
+    let entry = |version: u32| SerializedProjectWindow {
+        version,
+        project_group: SerializedProjectGroup::from_group(&key_a, true),
+        bounds: None,
+        display: None,
+        open_paths: Vec::new(),
+    };
+
+    // A version 0 entry, as the old build wrote it, deserializes as legacy.
+    let legacy: SerializedProjectWindow = serde_json::from_value(json!({
+        "project_group": serde_json::to_value(SerializedProjectGroup::from_group(&key_a, true)).unwrap(),
+        "bounds": null,
+        "display": null,
+        "open_paths": [],
+    }))
+    .unwrap();
+    assert_eq!(legacy.version, 0);
+
+    let mut persisted = vec![legacy, entry(0), entry(0)];
+    persisted.extend((0..20).map(|_| entry(SerializedProjectWindow::CURRENT_VERSION)));
+    multi_workspace.update(cx, |mw, cx| mw.restore_project_windows(persisted, cx));
+    cx.run_until_parked();
+
+    // Group A is displayed, so the valid entries open right away.
+    let windows = multi_workspace.read_with(cx, |mw, cx| mw.project_windows_for_group(&key_a, cx));
+    assert_eq!(
+        windows.len(),
+        crate::multi_workspace::MAX_RESTORED_PROJECT_WINDOWS_PER_GROUP
+    );
+    for window in windows {
+        assert!(!is_window_hidden(window, cx));
+    }
 }

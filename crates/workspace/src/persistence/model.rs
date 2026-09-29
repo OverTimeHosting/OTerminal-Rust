@@ -114,6 +114,73 @@ pub struct MultiWorkspaceState {
     pub project_groups: Vec<SerializedProjectGroup>,
     #[serde(default)]
     pub sidebar_state: Option<String>,
+    /// OTerminal: the extra windows owned by this window's project tabs.
+    #[serde(default)]
+    pub project_windows: Vec<SerializedProjectWindow>,
+}
+
+/// OTerminal: an extra window that belongs to one project tab. Its workspace
+/// shares the tab's `Project` and is not stored in the workspace database
+/// (whose rows are unique per set of paths), so only the window placement and
+/// the files open in it are remembered.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SerializedProjectWindow {
+    /// Entries older than [`Self::CURRENT_VERSION`] are dropped on restore.
+    #[serde(default)]
+    pub version: u32,
+    pub project_group: SerializedProjectGroup,
+    #[serde(default)]
+    pub bounds: Option<SerializedProjectWindowBounds>,
+    #[serde(default)]
+    pub display: Option<Uuid>,
+    #[serde(default)]
+    pub open_paths: Vec<PathBuf>,
+}
+
+impl SerializedProjectWindow {
+    /// Version 0 entries were written by a build that never showed project
+    /// windows; they are not windows anyone used and are not restored.
+    pub const CURRENT_VERSION: u32 = 1;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SerializedProjectWindowBounds {
+    #[serde(default)]
+    pub maximized: bool,
+    #[serde(default)]
+    pub fullscreen: bool,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl SerializedProjectWindowBounds {
+    pub fn from_window_bounds(bounds: gpui::WindowBounds) -> Self {
+        let inner = bounds.get_bounds();
+        Self {
+            maximized: matches!(bounds, gpui::WindowBounds::Maximized(_)),
+            fullscreen: matches!(bounds, gpui::WindowBounds::Fullscreen(_)),
+            x: f32::from(inner.origin.x),
+            y: f32::from(inner.origin.y),
+            width: f32::from(inner.size.width),
+            height: f32::from(inner.size.height),
+        }
+    }
+
+    pub fn to_window_bounds(self) -> gpui::WindowBounds {
+        let bounds = gpui::Bounds::new(
+            gpui::point(gpui::px(self.x), gpui::px(self.y)),
+            gpui::size(gpui::px(self.width), gpui::px(self.height)),
+        );
+        if self.fullscreen {
+            gpui::WindowBounds::Fullscreen(bounds)
+        } else if self.maximized {
+            gpui::WindowBounds::Maximized(bounds)
+        } else {
+            gpui::WindowBounds::Windowed(bounds)
+        }
+    }
 }
 
 /// The serialized state of a single MultiWorkspace window from a previous session:

@@ -12,10 +12,9 @@ use gpui::{
 };
 use http_client::{AsyncBody, HttpClient, StatusCode};
 use serde::Deserialize;
-use settings::Settings as _;
 use util::ResultExt;
 
-use crate::{AgentId, DisableAiSettings};
+use crate::AgentId;
 
 const REGISTRY_URL: &str = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
 const REFRESH_THROTTLE_DURATION: Duration = Duration::from_secs(60 * 60);
@@ -211,10 +210,9 @@ impl AgentRegistryStore {
             return;
         }
 
-        if DisableAiSettings::get_global(cx).disable_ai {
-            return;
-        }
-
+        // OTerminal: no `disable_ai` gate. With `disable_ai` the agent panel
+        // still runs Claude Code, which is installed from this registry (the
+        // ACP registry CDN, not Zed's servers).
         self.is_fetching = true;
         self.fetch_error = None;
         self.last_refresh = Some(Instant::now());
@@ -299,10 +297,7 @@ impl AgentRegistryStore {
         http_client: Arc<dyn HttpClient>,
         cx: &mut Context<Self>,
     ) {
-        if DisableAiSettings::get_global(cx).disable_ai {
-            return;
-        }
-
+        // OTerminal: loaded even with `disable_ai` (see `refresh`).
         cx.spawn(async move |this, cx| -> Result<()> {
             let cache_path = registry_cache_path();
             if !fs.is_file(&cache_path).await {

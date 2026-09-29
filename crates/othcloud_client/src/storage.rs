@@ -90,6 +90,36 @@ pub async fn secret_delete(key_url: &str, cx: &AsyncApp) -> Result<()> {
     provider.delete_credentials(key_url, cx).await
 }
 
+/// Reads a secret from the operating system's credential store (Windows
+/// Credential Manager, macOS Keychain, Secret Service), returning
+/// `(username, bytes)`.
+///
+/// Unlike [`secret_get`], this never falls back to Zed's plaintext
+/// `development_credentials` file in Dev builds: it is meant for long-lived
+/// third-party secrets such as locally stored GitHub tokens.
+pub async fn os_secret_get(key_url: &str, cx: &AsyncApp) -> Option<(String, Vec<u8>)> {
+    cx.update(|cx| cx.read_credentials(key_url))
+        .await
+        .log_err()
+        .flatten()
+}
+
+/// Writes a secret to the operating system's credential store. See [`os_secret_get`].
+pub async fn os_secret_set(
+    key_url: &str,
+    username: &str,
+    password: &[u8],
+    cx: &AsyncApp,
+) -> Result<()> {
+    cx.update(|cx| cx.write_credentials(key_url, username, password))
+        .await
+}
+
+/// Deletes a secret from the operating system's credential store. See [`os_secret_get`].
+pub async fn os_secret_delete(key_url: &str, cx: &AsyncApp) -> Result<()> {
+    cx.update(|cx| cx.delete_credentials(key_url)).await
+}
+
 pub async fn kv_get(key: &str, cx: &AsyncApp) -> Option<String> {
     let store = cx.update(|cx| KeyValueStore::global(cx));
     store.read_kvp(key).log_err().flatten()

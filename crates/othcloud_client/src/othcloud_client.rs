@@ -17,7 +17,10 @@ pub use api::{
 };
 pub use base_url::{absolute_url, base_url, host_of, pages};
 pub use deep_link::{URL_SCHEME, parse_pairing_url, register_url_scheme};
-pub use storage::{kv_delete, kv_get, kv_set, secret_delete, secret_get, secret_set};
+pub use storage::{
+    kv_delete, kv_get, kv_set, os_secret_delete, os_secret_get, os_secret_set, secret_delete,
+    secret_get, secret_set,
+};
 
 /// Creates the global [`OthcloudAccount`], restores a stored session, and makes
 /// sure this executable handles `othcloud-terminal://` links.

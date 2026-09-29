@@ -631,8 +631,11 @@
       "ctrl-alt-shift-right": "multi_workspace::MoveProjectDown",
       "ctrl-alt-shift-left": "multi_workspace::MoveProjectUp",
       "ctrl-alt-w": "project_tabs::CloseProjectTab",
+      "ctrl-alt-n": "project_tabs::NewProjectWindow",
       "ctrl-alt-o": "othcloud_panel::ToggleFocus",
       "ctrl-alt-c": "othcloud::NewClaudeCodeSession",
+      "ctrl-alt-a": "agent::ToggleFocus",
+      "ctrl-alt-shift-a": "agent::NewClaudeTab",
       // Move focus between the major regions of the window (editor, open
       // panels, status bar). Accessibility navigation; mirrors VS Code's
       // "Focus Next/Previous Part". `ctrl-f6` mirrors `f6` so region navigation

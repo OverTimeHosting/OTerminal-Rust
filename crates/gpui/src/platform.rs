@@ -932,6 +932,15 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn set_title(&mut self, title: &str);
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance);
     fn minimize(&self);
+    /// Shows or hides the window without destroying it. Showing must not
+    /// activate the window. The default minimizes / re-activates it.
+    fn set_visible(&self, visible: bool) {
+        if visible {
+            self.activate();
+        } else {
+            self.minimize();
+        }
+    }
     fn zoom(&self);
     fn toggle_fullscreen(&self);
     fn is_fullscreen(&self) -> bool;

@@ -615,6 +615,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             cx.new(|_| line_ending_selector::LineEndingIndicator::default());
         let git_blame_status = cx.new(|_| git_ui::GitBlameStatus::default());
         let othcloud_status = cx.new(othcloud_panel::OthcloudStatusItem::new);
+        let github_status = cx.new(othcloud_github::GithubStatusItem::new);
         let merge_conflict_indicator =
             cx.new(|cx| git_ui::MergeConflictIndicator::new(workspace, cx));
         workspace.status_bar().update(cx, |status_bar, cx| {
@@ -625,6 +626,7 @@ pub fn initialize_workspace(app_state: Arc<AppState>, cx: &mut App) {
             status_bar.add_left_item(git_blame_status, window, cx);
             status_bar.add_left_item(merge_conflict_indicator, window, cx);
             status_bar.add_left_item(activity_indicator, window, cx);
+            status_bar.add_right_item(github_status, window, cx);
             status_bar.add_right_item(othcloud_status, window, cx);
             status_bar.add_right_item(edit_prediction_ui, window, cx);
             status_bar.add_right_item(active_buffer_encoding, window, cx);
@@ -814,18 +816,20 @@ fn setup_or_teardown_ai_panel<P: Panel>(
     ) -> Task<anyhow::Result<Entity<P>>>
     + 'static,
 ) -> Task<anyhow::Result<()>> {
-    let disable_ai = SettingsStore::global(cx)
-        .get::<DisableAiSettings>(None)
-        .disable_ai
-        || cfg!(test);
+    // OTerminal: `disable_ai` keeps the agent panel (Claude Code only, see
+    // `DisableAiSettings::claude_code_only`); `agent.enabled: false` removes it.
+    let panel_disabled = |cx: &App| {
+        !SettingsStore::global(cx)
+            .get::<agent_settings::AgentSettings>(None)
+            .enabled
+    };
+    let disable_ai = panel_disabled(cx) || cfg!(test);
     let existing_panel = workspace.panel::<P>(cx);
     match (disable_ai, existing_panel) {
         (false, None) => cx.spawn_in(window, async move |workspace, cx| {
             let panel = load_panel(workspace.clone(), cx.clone()).await?;
             workspace.update_in(cx, |workspace, window, cx| {
-                let disable_ai = SettingsStore::global(cx)
-                    .get::<DisableAiSettings>(None)
-                    .disable_ai;
+                let disable_ai = panel_disabled(cx);
                 let have_panel = workspace.panel::<P>(cx).is_some();
                 if !disable_ai && !have_panel {
                     workspace.add_panel(panel, window, cx);
@@ -2385,13 +2389,29 @@ fn is_ai_keybinding(binding: &KeyBinding) -> bool {
         .any(|namespace| name.starts_with(namespace))
 }
 
+/// OTerminal: with `disable_ai` the agent panel still runs Claude Code
+/// (`DisableAiSettings::claude_code_only`), so the bindings of its actions
+/// stay while the agent is enabled.
+const AGENT_PANEL_ACTION_NAMESPACES: &[&str] = &["acp::", "agent::"];
+
+fn is_agent_panel_keybinding(binding: &KeyBinding) -> bool {
+    let name = binding.action().name();
+    AGENT_PANEL_ACTION_NAMESPACES
+        .iter()
+        .any(|namespace| name.starts_with(namespace))
+}
+
 fn filter_disabled_ai_bindings(bindings: Vec<KeyBinding>, cx: &App) -> Vec<KeyBinding> {
     if !DisableAiSettings::get_global(cx).disable_ai {
         return bindings;
     }
+    let keep_agent_panel_bindings = agent_settings::AgentSettings::get_global(cx).enabled;
     bindings
         .into_iter()
-        .filter(|binding| !is_ai_keybinding(binding))
+        .filter(|binding| {
+            !is_ai_keybinding(binding)
+                || (keep_agent_panel_bindings && is_agent_panel_keybinding(binding))
+        })
         .collect()
 }
 
@@ -5484,6 +5504,13 @@ mod tests {
     fn init_keymap_test(cx: &mut TestAppContext) -> Arc<AppState> {
         cx.update(|cx| {
             let app_state = AppState::test(cx);
+            // OTerminal ships `"disable_ai": true`, which saturates; these
+            // tests toggle it, so start from upstream's default.
+            SettingsStore::update_global(cx, |settings_store, cx| {
+                settings_store.update_default_settings(cx, |settings| {
+                    settings.project.disable_ai = Some(SaturatingBool(false));
+                });
+            });
 
             theme_settings::init(theme::LoadThemes::JustBase, cx);
             client::init(&app_state.client, cx);
@@ -6483,7 +6510,8 @@ mod tests {
         });
 
         // The default keymap should drop every AI-namespaced binding so that
-        // lower-precedence editor defaults can run instead.
+        // lower-precedence editor defaults can run instead -- except, in
+        // OTerminal, the agent panel's own bindings (Claude Code only mode).
         cx.update(|cx| {
             cx.clear_key_bindings();
             load_default_keymap(cx);
@@ -6491,12 +6519,21 @@ mod tests {
         cx.update(|cx| {
             let keymap = cx.key_bindings();
             let keymap = keymap.borrow();
-            if let Some(binding) = keymap.bindings().find(|b| is_ai_keybinding(b)) {
+            if let Some(binding) = keymap
+                .bindings()
+                .find(|b| is_ai_keybinding(b) && !is_agent_panel_keybinding(b))
+            {
                 panic!(
                     "expected no AI-namespaced bindings after disabling AI, but found `{}`",
                     binding.action().name()
                 );
             }
+            assert!(
+                keymap
+                    .bindings()
+                    .any(|b| b.action().name() == "agent::ToggleFocus"),
+                "expected the agent panel bindings to stay in Claude Code only mode"
+            );
         });
 
         // User-defined bindings to AI actions should also be filtered.
@@ -6509,7 +6546,10 @@ mod tests {
         cx.update(|cx| {
             let keymap = cx.key_bindings();
             let keymap = keymap.borrow();
-            if let Some(binding) = keymap.bindings().find(|b| is_ai_keybinding(b)) {
+            if let Some(binding) = keymap
+                .bindings()
+                .find(|b| is_ai_keybinding(b) && !is_agent_panel_keybinding(b))
+            {
                 panic!(
                     "expected user binding `{}` to be filtered when AI is disabled",
                     binding.action().name()
@@ -8173,6 +8213,10 @@ mod tests {
             assert!(
                 !has_view_item(cx, "Agent Panel"),
                 "expected Agent Panel to be removed from the View menu after disabling AI"
+            );
+            assert!(
+                has_view_item(cx, "Claude Code"),
+                "expected the Claude Code panel in the View menu in Claude Code only mode"
             );
             assert!(
                 has_view_item(cx, "Diagnostics"),

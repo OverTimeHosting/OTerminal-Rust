@@ -332,6 +332,21 @@ pub struct SettingsContent {
     /// Settings for developer-oriented instrumentation tools (profilers,
     /// tracers, etc.) that can be toggled at runtime.
     pub instrumentation: Option<InstrumentationSettingsContent>,
+
+    /// OTerminal: OTHCloud and GitHub integration.
+    pub othcloud: Option<OthcloudSettingsContent>,
+}
+
+/// OTerminal: settings for the OTHCloud and GitHub integration.
+#[with_fallible_options]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema, MergeFrom)]
+pub struct OthcloudSettingsContent {
+    /// The client id of a GitHub OAuth App (with device flow enabled) used for
+    /// "Sign in with GitHub" in the browser. When empty, GitHub accounts are
+    /// added by pasting a personal access token instead.
+    ///
+    /// Default: ""
+    pub github_oauth_client_id: Option<String>,
 }
 
 /// Configuration for developer-oriented instrumentation tools that collect
@@ -409,7 +424,7 @@ fallible_options::flattened_deserialize!(SettingsContent {
         journal, log, line_indicator_format, language_models, outline_panel, project_panel,
         node, proxy, reduce_motion, server_url, credentials_url, session, telemetry, terminal,
         title_bar, vim_mode, calls, which_key, vim, modeline_lines, feature_flags,
-        instrumentation,
+        instrumentation, othcloud,
     },
     defaults: {},
 });

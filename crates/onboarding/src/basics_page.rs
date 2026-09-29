@@ -680,16 +680,26 @@ fn render_ai_section(user_store: &Entity<UserStore>, cx: &mut App) -> impl IntoE
         .get::<AllAgentServersSettings>(None)
         .clone();
 
-    let column_count = 1 + FEATURED_AGENT_IDS.len() as u16;
+    // OTerminal: in Claude Code only mode the Zed Agent and other agents
+    // are not offered.
+    let claude_code_only = project::DisableAiSettings::claude_code_only(cx);
+    let featured_agent_ids: &[&str] = if claude_code_only {
+        &[project::agent_server_store::CLAUDE_CODE_AGENT_ID]
+    } else {
+        FEATURED_AGENT_IDS
+    };
+    let column_count = featured_agent_ids.len() as u16 + if claude_code_only { 0 } else { 1 };
 
-    let grid = FEATURED_AGENT_IDS.iter().fold(
+    let grid = featured_agent_ids.iter().fold(
         div()
             .w_full()
             .mt_1p5()
             .grid()
             .grid_cols(column_count)
             .gap_2()
-            .child(render_zed_agent_button(user_store, cx)),
+            .when(!claude_code_only, |grid| {
+                grid.child(render_zed_agent_button(user_store, cx))
+            }),
         |grid, agent_id| {
             let Some(agent) = registry_agents
                 .iter()
@@ -706,8 +716,12 @@ fn render_ai_section(user_store: &Entity<UserStore>, cx: &mut App) -> impl IntoE
         .gap_0p5()
         .child(Label::new("Agent Setup"))
         .child(
-            Label::new("Install your favorite agents and start your first thread.")
-                .color(Color::Muted),
+            Label::new(if claude_code_only {
+                "Claude Code runs in the agent panel with your own Claude Code login."
+            } else {
+                "Install your favorite agents and start your first thread."
+            })
+            .color(Color::Muted),
         )
         .child(grid)
 }

@@ -138,10 +138,13 @@ impl GithubTokenCredentials {
 
 impl GitCredentialOverride for GithubTokenCredentials {
     fn env_for_command(&self) -> Vec<(String, String)> {
+        // Deliberately no `GCM_INTERACTIVE=never`: that would also silence Git
+        // Credential Manager for every *other* host (Azure DevOps, GitLab,
+        // ...). GCM is not consulted for the GitHub hosts anyway, because
+        // `config_entries` resets their helper list.
         vec![
             (GITHUB_TOKEN_ENV_VAR.to_string(), self.token.clone()),
             ("GIT_TERMINAL_PROMPT".to_string(), "0".to_string()),
-            ("GCM_INTERACTIVE".to_string(), "never".to_string()),
         ]
     }
 
@@ -249,6 +252,81 @@ mod tests {
         let env = GithubTokenCredentials::github("secret".into()).env_for_command();
         assert!(env.contains(&("OTERMINAL_GH_TOKEN".to_string(), "secret".to_string())));
         assert!(env.contains(&("GIT_TERMINAL_PROMPT".to_string(), "0".to_string())));
-        assert!(env.contains(&("GCM_INTERACTIVE".to_string(), "never".to_string())));
+        // Other hosts must keep their interactive credential manager.
+        assert!(!env.iter().any(|(key, _)| key == "GCM_INTERACTIVE"));
+    }
+
+    #[test]
+    fn config_entries_only_touch_github_hosts() {
+        let credentials = GithubTokenCredentials {
+            hosts: vec![
+                "https://github.com/".to_string(),
+                "https://ghe.example.com".to_string(),
+            ],
+            token: "ghp_s3cr3tvalue".into(),
+        };
+        let entries = credentials.config_entries();
+        assert_eq!(
+            entries,
+            pairs(&[
+                ("credential.https://github.com.helper", ""),
+                ("credential.https://github.com.helper", GITHUB_TOKEN_HELPER),
+                ("credential.https://github.com.username", "x-access-token"),
+                ("credential.https://ghe.example.com.helper", ""),
+                (
+                    "credential.https://ghe.example.com.helper",
+                    GITHUB_TOKEN_HELPER
+                ),
+                (
+                    "credential.https://ghe.example.com.username",
+                    "x-access-token"
+                ),
+            ])
+        );
+        // Never a global `credential.helper` override: other hosts keep using
+        // the user's own helper (e.g. Git Credential Manager on Windows).
+        assert!(entries.iter().all(|(key, _)| key != "credential.helper"));
+        // The token itself never ends up in git config (or any argv).
+        assert!(
+            entries
+                .iter()
+                .all(|(_, value)| !value.contains("ghp_s3cr3tvalue"))
+        );
+    }
+
+    #[test]
+    fn env_is_empty_without_override_and_complete_with_one() {
+        // Tests share the process-global override; this is the only test that
+        // installs one.
+        set_git_credential_override(None);
+        assert!(git_credential_env().is_empty());
+        assert!(!git_credential_override_active());
+
+        set_git_credential_override(Some(Arc::new(GithubTokenCredentials::github(
+            "secret".into(),
+        ))));
+        let env = git_credential_env();
+        set_git_credential_override(None);
+
+        let get = |key: &str| {
+            env.iter()
+                .rev()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(get(GITHUB_TOKEN_ENV_VAR).as_deref(), Some("secret"));
+        let base = std::env::var("GIT_CONFIG_COUNT")
+            .ok()
+            .and_then(|count| count.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        assert_eq!(get("GIT_CONFIG_COUNT"), Some((base + 3).to_string()));
+        assert_eq!(
+            get(&format!("GIT_CONFIG_KEY_{base}")).as_deref(),
+            Some("credential.https://github.com.helper")
+        );
+        assert_eq!(
+            get(&format!("GIT_CONFIG_VALUE_{base}")).as_deref(),
+            Some("")
+        );
     }
 }

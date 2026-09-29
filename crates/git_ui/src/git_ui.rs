@@ -60,6 +60,23 @@ pub mod unstaged_diff;
 pub use blame_ui::GitBlameStatus;
 pub use conflict_view::MergeConflictIndicator;
 
+/// OTerminal: an application-provided "Clone Repository" flow that replaces
+/// the built-in URL prompt for `git: clone` (see [`set_clone_repository_handler`]).
+struct CloneRepositoryHandler(
+    std::sync::Arc<dyn Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + Send + Sync>,
+);
+
+impl gpui::Global for CloneRepositoryHandler {}
+
+/// Makes `git: clone` (command palette, welcome page, git panel, project
+/// panel) open `handler` instead of the built-in clone prompt.
+pub fn set_clone_repository_handler(
+    handler: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + Send + Sync + 'static,
+    cx: &mut App,
+) {
+    cx.set_global(CloneRepositoryHandler(std::sync::Arc::new(handler)));
+}
+
 pub fn init(cx: &mut App) {
     editor::set_blame_renderer(blame_ui::GitBlameRenderer, cx);
     commit_view::init(cx);
@@ -320,6 +337,11 @@ pub fn init(cx: &mut App) {
             });
         });
         workspace.register_action(|workspace, _action: &git::Clone, window, cx| {
+            if let Some(handler) = cx.try_global::<CloneRepositoryHandler>() {
+                let handler = handler.0.clone();
+                handler(workspace, window, cx);
+                return;
+            }
             let Some(panel) = workspace.panel::<git_panel::GitPanel>(cx) else {
                 return;
             };

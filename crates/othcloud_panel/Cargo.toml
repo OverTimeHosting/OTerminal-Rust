@@ -22,6 +22,7 @@ gpui.workspace = true
 log.workspace = true
 menu.workspace = true
 othcloud_client.workspace = true
+othcloud_github.workspace = true
 release_channel.workspace = true
 serde.workspace = true
 serde_json.workspace = true

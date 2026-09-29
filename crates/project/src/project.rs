@@ -1176,6 +1176,14 @@ impl DisableAiSettings {
         });
         Self::get(location, cx).disable_ai
     }
+
+    /// OTerminal: with `disable_ai` on, Zed's own AI (Zed Agent, language
+    /// models, edit predictions, inline assist, sign-in and upsells) stays
+    /// off, but the agent panel keeps running Claude Code — an external ACP
+    /// agent that uses the user's own Claude Code login — and nothing else.
+    pub fn claude_code_only(cx: &App) -> bool {
+        Self::get_global(cx).disable_ai
+    }
 }
 
 impl Project {

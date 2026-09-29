@@ -430,8 +430,13 @@ impl OthcloudApi {
     }
 
     /// Saves a GitHub token (OAuth, classic or fine-grained PAT) as one of the
-    /// user's GitHub accounts on OTHCloud.
-    pub async fn add_github_account(&self, token: &str) -> Result<GithubAccount, ApiError> {
+    /// user's GitHub accounts on OTHCloud. With `deploy_provider`, OTHCloud
+    /// also registers it as a GitHub deploy provider so it can deploy from it.
+    pub async fn add_github_account(
+        &self,
+        token: &str,
+        deploy_provider: bool,
+    ) -> Result<GithubAccount, ApiError> {
         #[derive(Deserialize)]
         struct AddAccountResponse {
             account: GithubAccount,
@@ -441,7 +446,7 @@ impl OthcloudApi {
             .request(
                 Method::POST,
                 "/api/desktop/github-accounts",
-                Some(json!({ "token": token })),
+                Some(json!({ "token": token, "deployProvider": deploy_provider })),
             )
             .await?;
         Ok(response.account)

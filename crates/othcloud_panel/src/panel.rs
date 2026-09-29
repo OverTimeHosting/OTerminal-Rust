@@ -152,6 +152,9 @@ impl OthcloudPanel {
                 cx.notify();
             }));
         }
+        if let Some(github) = othcloud_github::GithubAccountStore::global(cx) {
+            subscriptions.push(cx.observe(&github, |_, _, cx| cx.notify()));
+        }
 
         Self {
             focus_handle: cx.focus_handle(),
@@ -413,7 +416,7 @@ impl OthcloudPanel {
                 .child(
                     h_flex()
                         .gap_2()
-                        .child(Icon::new(IconName::Othcloud).size(IconSize::Medium))
+                        .child(gpui::img("images/oth_logo.png").flex_none().size(px(28.)))
                         .child(Headline::new("Sign in to OTHCloud").size(HeadlineSize::Small)),
                 )
                 .child(
@@ -920,6 +923,93 @@ impl OthcloudPanel {
             .into_any_element()
     }
 
+    /// GitHub: the account git uses on github.com, and cloning.
+    fn render_github(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = cx.theme().colors();
+        let (label, problem, source) = othcloud_github::GithubAccountStore::global(cx)
+            .map(|store| {
+                let store = store.read(cx);
+                let source = store.active_account().map(|active| {
+                    if active.is_local() {
+                        "stored on this PC"
+                    } else {
+                        "via OTHCloud"
+                    }
+                });
+                (store.active_label(cx), store.problem().cloned(), source)
+            })
+            .unwrap_or_default();
+        let subtitle: SharedString = match (&problem, source, &label) {
+            (Some(problem), _, _) => problem.clone(),
+            (None, Some(source), _) => source.into(),
+            (None, None, Some(_)) => "connecting…".into(),
+            (None, None, None) => "No account: git uses your credential manager".into(),
+        };
+        let title: SharedString = label.unwrap_or_else(|| "Not signed in".to_string()).into();
+        v_flex()
+            .w_full()
+            .border_t_1()
+            .border_color(colors.border)
+            .child(ListHeader::new("GitHub"))
+            .child(
+                h_flex()
+                    .px_3()
+                    .pb_1()
+                    .gap_2()
+                    .child(Icon::new(IconName::Github).size(IconSize::Small).color(
+                        if problem.is_some() {
+                            Color::Warning
+                        } else {
+                            Color::Muted
+                        },
+                    ))
+                    .child(
+                        v_flex()
+                            .min_w_0()
+                            .child(Label::new(title).size(LabelSize::Small))
+                            .child(
+                                Label::new(subtitle)
+                                    .size(LabelSize::XSmall)
+                                    .color(if problem.is_some() {
+                                        Color::Warning
+                                    } else {
+                                        Color::Muted
+                                    })
+                                    .truncate(),
+                            ),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .px_2()
+                    .pb_2()
+                    .gap_1()
+                    .child(
+                        Button::new("othcloud-github-clone", "Clone Repository")
+                            .style(ButtonStyle::Filled)
+                            .label_size(LabelSize::Small)
+                            .start_icon(Icon::new(IconName::Download).size(IconSize::XSmall))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(
+                                    othcloud_github::CloneRepository.boxed_clone(),
+                                    cx,
+                                )
+                            }),
+                    )
+                    .child(
+                        Button::new("othcloud-github-switch", "Switch Account")
+                            .style(ButtonStyle::Subtle)
+                            .label_size(LabelSize::Small)
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(
+                                    othcloud_github::SwitchGithubAccount.boxed_clone(),
+                                    cx,
+                                )
+                            }),
+                    ),
+            )
+    }
+
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
         let link = |id: &'static str, label: &'static str, url: String| {
@@ -1055,6 +1145,7 @@ impl Render for OthcloudPanel {
                     .track_scroll(&self.scroll_handle)
                     .child(body),
             )
+            .child(self.render_github(cx))
             .child(self.render_footer(cx))
     }
 }

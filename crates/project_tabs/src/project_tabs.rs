@@ -28,11 +28,26 @@ actions!(
     [
         /// Closes the active project tab, prompting to save unsaved changes.
         CloseProjectTab,
+        /// Opens another window for the active project. The window belongs to
+        /// the project's tab: it is hidden while another tab is active and
+        /// reappears, unchanged, when the project's tab is active again.
+        NewProjectWindow,
     ]
 );
 
 pub fn init(cx: &mut App) {
     cx.observe_new(|workspace: &mut Workspace, _window, _cx| {
+        workspace.register_action(|workspace, _: &NewProjectWindow, window, cx| {
+            let Some(multi_workspace) = workspace
+                .multi_workspace()
+                .and_then(|multi_workspace| multi_workspace.upgrade())
+            else {
+                return;
+            };
+            window.defer(cx, move |window, cx| {
+                open_project_window(&multi_workspace, window, cx);
+            });
+        });
         workspace.register_action(|workspace, _: &CloseProjectTab, window, cx| {
             let Some(multi_workspace) = workspace
                 .multi_workspace()
@@ -40,6 +55,12 @@ pub fn init(cx: &mut App) {
             else {
                 return;
             };
+            // A project window has no tabs of its own: closing "its tab"
+            // closes the window.
+            if multi_workspace.read(cx).is_project_window() {
+                window.dispatch_action(workspace::CloseWindow.boxed_clone(), cx);
+                return;
+            }
             let key = workspace.project_group_key(cx);
             if key.path_list().paths().is_empty() {
                 return;
@@ -52,6 +73,22 @@ pub fn init(cx: &mut App) {
         });
     })
     .detach();
+}
+
+/// Opens another window for the project displayed in `multi_workspace`'s
+/// window (see [`NewProjectWindow`]).
+fn open_project_window(
+    multi_workspace: &Entity<MultiWorkspace>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let result = multi_workspace.update(cx, |multi_workspace, cx| {
+        multi_workspace.open_project_window(window, cx)
+    });
+    if let Err(error) = result {
+        let workspace = multi_workspace.read(cx).workspace().clone();
+        workspace.update(cx, |workspace, cx| workspace.show_error(error, cx));
+    }
 }
 
 fn close_project_group(
@@ -129,7 +166,11 @@ impl ProjectTabs {
         window.defer(cx, move |_window, cx| {
             weak_multi_workspace
                 .update(cx, |multi_workspace, cx| {
-                    if !multi_workspace.active_workspace_is_retained() {
+                    // A project window shows its owner's project; it keeps no
+                    // tabs of its own.
+                    if !multi_workspace.is_project_window()
+                        && !multi_workspace.active_workspace_is_retained()
+                    {
                         multi_workspace.retain_active_workspace(cx);
                     }
                 })
@@ -248,6 +289,7 @@ impl ProjectTabs {
         index: usize,
         tab: TabInfo,
         tab_count: usize,
+        height: Pixels,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let colors = cx.theme().colors();
@@ -259,6 +301,7 @@ impl ProjectTabs {
             is_active,
             is_dirty,
             running_terminals,
+            project_windows,
             closable,
         } = tab;
 
@@ -286,9 +329,10 @@ impl ProjectTabs {
             .group(group_name.clone())
             .relative()
             .flex_none()
-            .h_full()
-            .px_3()
-            .gap_1p5()
+            .h(height)
+            .items_center()
+            .px_4()
+            .gap_2()
             .border_r_1()
             .border_color(colors.border)
             .cursor_pointer()
@@ -318,6 +362,24 @@ impl ProjectTabs {
                     Icon::new(IconName::Terminal)
                         .size(IconSize::XSmall)
                         .color(Color::Muted),
+                )
+            })
+            .when(project_windows > 0, |tab| {
+                tab.child(
+                    h_flex()
+                        .gap_0p5()
+                        .child(
+                            Icon::new(IconName::Screen)
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                        .when(project_windows > 1, |this| {
+                            this.child(
+                                Label::new(project_windows.to_string())
+                                    .size(LabelSize::XSmall)
+                                    .color(Color::Muted),
+                            )
+                        }),
                 )
             })
             .children(close_button)
@@ -433,22 +495,57 @@ impl ProjectTabs {
                             }
                         }
                     };
+                    let new_project_window = {
+                        let multi_workspace = multi_workspace.clone();
+                        let key = key.clone();
+                        move |window: &mut Window, cx: &mut App| {
+                            let Some(multi_workspace) = multi_workspace.upgrade() else {
+                                return;
+                            };
+                            // The window belongs to this tab, and is only shown
+                            // while the tab is active: show the tab first.
+                            multi_workspace.update(cx, |multi_workspace, cx| {
+                                multi_workspace.activate_project_group(&key, window, cx);
+                            });
+                            let displayed_key = {
+                                let multi_workspace = multi_workspace.read(cx);
+                                multi_workspace.project_group_key_for_workspace(
+                                    multi_workspace.workspace(),
+                                    cx,
+                                )
+                            };
+                            // A project that still has to load opens as a tab
+                            // first; its windows can be opened once it's there.
+                            if displayed_key == key {
+                                open_project_window(&multi_workspace, window, cx);
+                            }
+                        }
+                    };
                     let reveal_path = paths.first().cloned();
 
-                    menu.entry("Close", Some(CloseProjectTab.boxed_clone()), close)
-                        .when(tab_count > 1, |menu| {
-                            menu.entry("Close Others", None, close_others).entry(
-                                "Move to New Window",
-                                None,
-                                move_to_new_window,
-                            )
-                        })
-                        .when_some(reveal_path.filter(|_| is_local), |menu, path| {
+                    menu.entry(
+                        "New Window for This Project",
+                        Some(NewProjectWindow.boxed_clone()),
+                        new_project_window,
+                    )
+                    .separator()
+                    .entry("Close", Some(CloseProjectTab.boxed_clone()), close)
+                    .when(tab_count > 1, |menu| {
+                        menu.entry("Close Others", None, close_others).entry(
+                            "Move to New Window",
+                            None,
+                            move_to_new_window,
+                        )
+                    })
+                    .when_some(
+                        reveal_path.filter(|_| is_local),
+                        |menu, path| {
                             menu.separator()
                                 .entry("Reveal in File Manager", None, move |_, cx| {
                                     cx.reveal_path(&path);
                                 })
-                        })
+                        },
+                    )
                 })
             })
             .into_any_element()
@@ -498,6 +595,8 @@ struct TabInfo {
     is_active: bool,
     is_dirty: bool,
     running_terminals: usize,
+    /// Extra windows owned by the tab (see [`NewProjectWindow`]).
+    project_windows: usize,
     closable: bool,
 }
 
@@ -524,7 +623,11 @@ fn tab_label(key: &ProjectGroupKey) -> SharedString {
     }
 }
 
-fn tab_tooltip(key: &ProjectGroupKey, running_terminals: usize) -> SharedString {
+fn tab_tooltip(
+    key: &ProjectGroupKey,
+    running_terminals: usize,
+    project_windows: usize,
+) -> SharedString {
     let mut tooltip = key
         .path_list()
         .ordered_paths()
@@ -541,6 +644,11 @@ fn tab_tooltip(key: &ProjectGroupKey, running_terminals: usize) -> SharedString 
         0 => {}
         1 => tooltip.push_str("\n1 terminal running"),
         count => tooltip.push_str(&format!("\n{count} terminals running")),
+    }
+    match project_windows {
+        0 => {}
+        1 => tooltip.push_str("\n1 extra window"),
+        count => tooltip.push_str(&format!("\n{count} extra windows")),
     }
     tooltip.into()
 }
@@ -561,10 +669,69 @@ fn running_terminal_count(workspace: &Workspace, cx: &App) -> usize {
 }
 
 impl Render for ProjectTabs {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The tabs span the title bar edge to edge (a percentage height doesn't
+        // reach them through the title bar's containers, which left them
+        // floating in its middle).
+        let height = ui::utils::platform_title_bar_height(window);
         let Some(multi_workspace) = self.multi_workspace.upgrade() else {
-            return h_flex().id("project-tabs").h_full();
+            return h_flex().id("project-tabs").h(height);
         };
+
+        let new_window_button = IconButton::new("project-tabs-new-window", IconName::Screen)
+            .icon_size(IconSize::Small)
+            .icon_color(Color::Muted)
+            .tooltip(|_window, cx| {
+                Tooltip::for_action("New Window for This Project", &NewProjectWindow, cx)
+            })
+            .on_click(|_, window, cx| {
+                window.dispatch_action(NewProjectWindow.boxed_clone(), cx);
+            });
+
+        // A project window belongs to one tab of another window: show which,
+        // with no tabs of its own.
+        if multi_workspace.read(cx).is_project_window() {
+            let key = {
+                let multi_workspace = multi_workspace.read(cx);
+                multi_workspace.project_group_key_for_workspace(multi_workspace.workspace(), cx)
+            };
+            let colors = cx.theme().colors();
+            let label = tab_label(&key);
+            let tooltip: SharedString = format!(
+                "Extra window of the project \u{201c}{label}\u{201d}.\n\
+                 It is hidden while another project tab is active in the main window."
+            )
+            .into();
+            return h_flex()
+                .id("project-tabs")
+                .h(height)
+                .min_w_0()
+                .ml_1()
+                .border_l_1()
+                .border_color(colors.border)
+                .child(
+                    h_flex()
+                        .id("project-window-label")
+                        .relative()
+                        .flex_none()
+                        .h(height)
+                        .items_center()
+                        .px_4()
+                        .gap_2()
+                        .border_r_1()
+                        .border_color(colors.border)
+                        .bg(colors.tab_active_background)
+                        .child(
+                            Icon::new(IconName::Screen)
+                                .size(IconSize::XSmall)
+                                .color(Color::Muted),
+                        )
+                        .child(Label::new(label).size(LabelSize::Small).single_line())
+                        .tooltip(Tooltip::text(tooltip)),
+                )
+                .child(div().flex_none().px_1().child(new_window_button))
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
+        }
 
         let tabs: Vec<TabInfo> = {
             let multi_workspace = multi_workspace.read(cx);
@@ -585,13 +752,17 @@ impl Render for ProjectTabs {
                         .iter()
                         .map(|workspace| running_terminal_count(workspace.read(cx), cx))
                         .sum();
+                    let project_windows = multi_workspace
+                        .project_windows_for_group(&group.key, cx)
+                        .len();
                     TabInfo {
                         label: tab_label(&group.key),
-                        tooltip: tab_tooltip(&group.key, running_terminals),
+                        tooltip: tab_tooltip(&group.key, running_terminals, project_windows),
                         key: group.key,
                         is_active,
                         is_dirty,
                         running_terminals,
+                        project_windows,
                         closable: true,
                     }
                 })
@@ -606,54 +777,64 @@ impl Render for ProjectTabs {
                 let running_terminals = running_terminal_count(workspace, cx);
                 tabs.push(TabInfo {
                     label: tab_label(&active_key),
-                    tooltip: tab_tooltip(&active_key, running_terminals),
+                    tooltip: tab_tooltip(&active_key, running_terminals, 0),
                     key: active_key,
                     is_active: true,
                     is_dirty,
                     running_terminals,
+                    project_windows: 0,
                     closable: false,
                 });
             }
             tabs
         };
 
+        let active_has_folder = tabs
+            .iter()
+            .any(|tab| tab.is_active && !tab.key.path_list().paths().is_empty());
         let tab_count = tabs.len();
         let tab_elements: Vec<AnyElement> = tabs
             .into_iter()
             .enumerate()
-            .map(|(index, tab)| self.render_tab(index, tab, tab_count, cx))
+            .map(|(index, tab)| self.render_tab(index, tab, tab_count, height, cx))
             .collect();
 
         h_flex()
             .id("project-tabs")
-            .h_full()
+            .h(height)
             .min_w_0()
+            .ml_1()
             .border_l_1()
             .border_color(cx.theme().colors().border)
             .child(
                 h_flex()
                     .id("project-tabs-scroll")
-                    .h_full()
+                    .h(height)
                     .min_w_0()
                     .overflow_x_scroll()
                     .children(tab_elements),
             )
             .child(
-                div().flex_none().px_1().child(
-                    IconButton::new("project-tabs-open", IconName::Plus)
-                        .icon_size(IconSize::Small)
-                        .icon_color(Color::Muted)
-                        .tooltip(Tooltip::text("Open Project…"))
-                        .on_click(|_, window, cx| {
-                            window.dispatch_action(
-                                workspace::Open {
-                                    create_new_window: Some(false),
-                                }
-                                .boxed_clone(),
-                                cx,
-                            );
-                        }),
-                ),
+                h_flex()
+                    .flex_none()
+                    .px_1()
+                    .gap_0p5()
+                    .child(
+                        IconButton::new("project-tabs-open", IconName::Plus)
+                            .icon_size(IconSize::Small)
+                            .icon_color(Color::Muted)
+                            .tooltip(Tooltip::text("Open Project…"))
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(
+                                    workspace::Open {
+                                        create_new_window: Some(false),
+                                    }
+                                    .boxed_clone(),
+                                    cx,
+                                );
+                            }),
+                    )
+                    .when(active_has_folder, |this| this.child(new_window_button)),
             )
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
     }
@@ -675,7 +856,9 @@ mod tests {
         };
         let key = ProjectGroupKey::new(None, PathList::new(&[root.clone()]));
         assert_eq!(tab_label(&key).as_ref(), "othcloud");
-        assert!(tab_tooltip(&key, 2).contains("2 terminals running"));
+        assert!(tab_tooltip(&key, 2, 0).contains("2 terminals running"));
+        assert!(!tab_tooltip(&key, 0, 0).contains("window"));
+        assert!(tab_tooltip(&key, 0, 2).contains("2 extra windows"));
 
         let other = root.with_file_name("oterminal");
         let key = ProjectGroupKey::new(None, PathList::new(&[root, other]));

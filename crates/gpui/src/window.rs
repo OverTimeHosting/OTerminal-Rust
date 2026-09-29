@@ -1145,6 +1145,8 @@ pub struct Window {
     pub(crate) handle: AnyWindowHandle,
     pub(crate) invalidator: WindowInvalidator,
     pub(crate) removed: bool,
+    /// Whether the application hid this window with [`Window::set_window_hidden`].
+    hidden_by_app: Cell<bool>,
     pub(crate) platform_window: Box<dyn PlatformWindow>,
     display_id: Option<DisplayId>,
     is_resizable: bool,
@@ -2014,6 +2016,7 @@ impl Window {
             handle,
             invalidator,
             removed: false,
+            hidden_by_app: Cell::new(false),
             platform_window,
             display_id,
             is_resizable,
@@ -6300,8 +6303,35 @@ impl Window {
     }
 
     /// Focus the current window and bring it to the foreground at the platform level.
+    ///
+    /// A window hidden with [`Window::set_window_hidden`] is shown again first.
     pub fn activate_window(&self) {
+        self.unhide_window();
         self.platform_window.activate();
+    }
+
+    /// Hides the window from the screen (and from the taskbar / dock where the
+    /// platform supports it) without closing it, or shows it again. The window
+    /// keeps all of its state while hidden. Showing a window does not activate
+    /// it; call [`Window::activate_window`] for that.
+    ///
+    /// Platforms without native support fall back to minimizing and
+    /// re-activating the window.
+    pub fn set_window_hidden(&self, hidden: bool) {
+        if self.hidden_by_app.replace(hidden) != hidden {
+            self.platform_window.set_visible(!hidden);
+        }
+    }
+
+    /// Whether the window is hidden by [`Window::set_window_hidden`].
+    pub fn is_window_hidden(&self) -> bool {
+        self.hidden_by_app.get()
+    }
+
+    fn unhide_window(&self) {
+        if self.hidden_by_app.replace(false) {
+            self.platform_window.set_visible(true);
+        }
     }
 
     /// Requests that the operating system draw attention to this window.
@@ -6353,6 +6383,8 @@ impl Window {
     where
         T: Clone + Into<PromptButton>,
     {
+        // A prompt has to be seen to be answered.
+        self.unhide_window();
         let prompt_builder = cx.prompt_builder.take();
         let Some(prompt_builder) = prompt_builder else {
             unreachable!("Re-entrant window prompting is not supported by GPUI");

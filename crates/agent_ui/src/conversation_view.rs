@@ -6688,7 +6688,8 @@ pub(crate) mod tests {
 
     pub(crate) fn init_test(cx: &mut TestAppContext) {
         cx.update(|cx| {
-            let settings_store = SettingsStore::test(cx);
+            let mut settings_store = SettingsStore::test(cx);
+            crate::test_support::enable_ai_for_tests(&mut settings_store, cx);
             cx.set_global(settings_store);
             // Use an isolated DB so parallel tests can't overwrite each
             // other's global keys (e.g. the last-created entry kind).

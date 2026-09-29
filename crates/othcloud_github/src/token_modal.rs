@@ -1,28 +1,27 @@
-//! "Sign in to GitHub": saves a GitHub token (OAuth, classic or fine-grained
-//! PAT) as one of the user's GitHub accounts on OTHCloud and switches to it.
-
-use std::sync::Arc;
+//! "Add a GitHub account with a token": validates a personal access token
+//! with GitHub, stores it in the system credential store on this PC, and
+//! makes it the active account. Optionally also saves it on OTHCloud.
 
 use editor::Editor;
 use gpui::{
-    App, AppContext as _, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    Render, SharedString, Task, WeakEntity, Window,
+    App, AppContext as _, AsyncApp, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
+    Focusable, Render, SharedString, Task, WeakEntity, Window,
 };
-use othcloud_client::{ApiError, OthcloudApi};
-use ui::{Button, ButtonStyle, Headline, HeadlineSize, prelude::*};
+use othcloud_client::ApiError;
+use ui::{Button, ButtonStyle, Checkbox, Headline, HeadlineSize, ToggleState, prelude::*};
 use workspace::{ModalView, Workspace};
 
-use crate::{GithubAccountStore, show_status};
-
-const CREATE_TOKEN_URL: &str =
-    "https://github.com/settings/tokens/new?scopes=repo,workflow,read:org&description=OTerminal";
+use crate::{
+    GithubAccountStore, LocalGithubAccount, SignInToGithub, github_api, oauth_client_id,
+    othcloud_api, othcloud_signed_in, show_status,
+};
 
 pub struct GithubTokenModal {
     workspace: WeakEntity<Workspace>,
-    api: Arc<OthcloudApi>,
     editor: Entity<Editor>,
     error: Option<SharedString>,
     saving: bool,
+    save_to_othcloud: bool,
     _save_task: Option<Task<()>>,
 }
 
@@ -38,7 +37,6 @@ impl Focusable for GithubTokenModal {
 impl GithubTokenModal {
     pub fn new(
         workspace: WeakEntity<Workspace>,
-        api: Arc<OthcloudApi>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -50,10 +48,10 @@ impl GithubTokenModal {
         });
         Self {
             workspace,
-            api,
             editor,
             error: None,
             saving: false,
+            save_to_othcloud: false,
             _save_task: None,
         }
     }
@@ -70,7 +68,7 @@ impl GithubTokenModal {
         if self.saving {
             return;
         }
-        let token = self.editor.read(cx).text(cx).trim().to_string();
+        let token = github_api::normalize_token(&self.editor.read(cx).text(cx));
         if token.is_empty() {
             self.error = Some("Paste a GitHub token first.".into());
             cx.notify();
@@ -80,52 +78,32 @@ impl GithubTokenModal {
         self.error = None;
         cx.notify();
 
-        let api = self.api.clone();
-        let host = api.host().to_string();
+        let http = cx.http_client();
+        let save_to_othcloud = self.save_to_othcloud && othcloud_signed_in(cx);
         let workspace = self.workspace.clone();
-        let save = cx.background_spawn(async move {
-            let account = api.add_github_account(&token).await?;
-            let response = api.github_token(Some(&account.id)).await;
-            Ok::<_, ApiError>((account, response))
-        });
         self._save_task = Some(cx.spawn(async move |this, cx| {
-            match save.await {
-                Ok((account, token_response)) => {
-                    let label = account.label.clone();
-                    cx.update(|cx| {
-                        let Some(store) = GithubAccountStore::global(cx) else {
-                            return;
-                        };
-                        store.update(cx, |store, cx| match token_response {
-                            Ok(response) if !response.token.is_empty() => {
-                                store.use_account(account.id.clone(), response, cx)
-                            }
-                            // Saved, but no token yet: select it and let the
-                            // store fetch one.
-                            _ => store.select_account(account.id.clone(), cx),
-                        });
-                    });
+            let validation = cx
+                .background_spawn({
+                    let token = token.clone();
+                    async move { github_api::validate_token(http, &token).await }
+                })
+                .await;
+            let result = match validation {
+                Ok(validated) => {
+                    save_local_account(token, validated, "token", save_to_othcloud, cx).await
+                }
+                Err(error) => Err(error.message()),
+            };
+            match result {
+                Ok(message) => {
                     workspace
                         .update(cx, |workspace, cx| {
-                            show_status(
-                                workspace,
-                                format!("OTerminal now uses GitHub as {label}"),
-                                false,
-                                cx,
-                            )
+                            show_status(workspace, message, false, cx)
                         })
                         .ok();
                     this.update(cx, |_, cx| cx.emit(DismissEvent)).ok();
                 }
-                Err(error) => {
-                    if error.is_unauthorized() {
-                        cx.update(|cx| {
-                            if let Some(account) = othcloud_client::OthcloudAccount::global(cx) {
-                                account.update(cx, |account, cx| account.handle_unauthorized(cx));
-                            }
-                        });
-                    }
-                    let message = sign_in_error_message(&error, &host);
+                Err(message) => {
                     this.update(cx, |this, cx| {
                         this.saving = false;
                         this.error = Some(message.into());
@@ -138,8 +116,65 @@ impl GithubTokenModal {
     }
 }
 
+/// Stores a validated token as a local account (and, if asked, on OTHCloud)
+/// and makes it active. Returns the message to show on success.
+pub(crate) async fn save_local_account(
+    token: String,
+    validated: github_api::ValidatedToken,
+    source: &str,
+    save_to_othcloud: bool,
+    cx: &mut AsyncApp,
+) -> Result<String, String> {
+    let mut account = LocalGithubAccount::from_validated(&validated, source);
+    let login = account.login.clone();
+
+    let mut othcloud_warning = None;
+    if save_to_othcloud && let Some(api) = cx.update(|cx| othcloud_api(cx)) {
+        let host = api.host().to_string();
+        let token_for_othcloud = token.clone();
+        let saved = cx
+            .background_spawn(
+                async move { api.add_github_account(&token_for_othcloud, true).await },
+            )
+            .await;
+        match saved {
+            Ok(_) => {
+                account.saved_to_othcloud = true;
+                cx.update(|cx| {
+                    if let Some(store) = GithubAccountStore::global(cx) {
+                        store.update(cx, |store, cx| store.refresh_othcloud_accounts(cx));
+                    }
+                });
+            }
+            Err(error) => {
+                if error.is_unauthorized() {
+                    cx.update(crate::handle_othcloud_unauthorized);
+                }
+                othcloud_warning = Some(othcloud_save_error_message(&error, &host));
+            }
+        }
+    }
+
+    let Some(store) = cx.update(|cx| GithubAccountStore::global(cx)) else {
+        return Err("GitHub accounts aren't available.".to_string());
+    };
+    let task =
+        cx.update(|cx| store.update(cx, |store, cx| store.add_local_account(account, token, cx)));
+    task.await.map_err(|error| format!("{error:#}"))?;
+
+    Ok(match othcloud_warning {
+        None if save_to_othcloud => {
+            format!("OTerminal now uses GitHub as {login} (also saved to OTHCloud)")
+        }
+        None => format!("OTerminal now uses GitHub as {login}"),
+        Some(warning) => format!(
+            "OTerminal now uses GitHub as {login}, but saving it to OTHCloud failed: {warning}"
+        ),
+    })
+}
+
 /// The message shown for a failed `POST /api/desktop/github-accounts`.
-pub(crate) fn sign_in_error_message(error: &ApiError, host: &str) -> String {
+pub(crate) fn othcloud_save_error_message(error: &ApiError, host: &str) -> String {
     match (error.status, error.code.as_str()) {
         (_, "invalid_token") => "GitHub rejected that token.".to_string(),
         (_, "missing_repo_scope") => "The token needs the repo scope.".to_string(),
@@ -148,6 +183,7 @@ pub(crate) fn sign_in_error_message(error: &ApiError, host: &str) -> String {
         }
         (404 | 405, _) => "This OTHCloud server can't save GitHub accounts yet.".to_string(),
         (_, "github_unavailable") => "GitHub didn't answer. Try again in a moment.".to_string(),
+        (401, _) => "Your OTHCloud session expired. Sign in to OTHCloud again.".to_string(),
         _ => error.friendly_message(host),
     }
 }
@@ -155,6 +191,8 @@ pub(crate) fn sign_in_error_message(error: &ApiError, host: &str) -> String {
 impl Render for GithubTokenModal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let colors = cx.theme().colors();
+        let signed_in = othcloud_signed_in(cx);
+        let browser_sign_in = oauth_client_id(cx).is_some();
         // `AskPass > Editor` binds enter to `menu::Confirm`.
         v_flex()
             .key_context("AskPass")
@@ -169,19 +207,21 @@ impl Render for GithubTokenModal {
                 }
             }))
             .elevation_3(cx)
-            .w(rems(30.))
+            .w(rems(32.))
             .p_4()
             .gap_3()
             .child(
                 h_flex()
                     .gap_2()
                     .child(Icon::new(IconName::Github).size(IconSize::Small))
-                    .child(Headline::new("Sign in to GitHub").size(HeadlineSize::Small)),
+                    .child(Headline::new("Add a GitHub account").size(HeadlineSize::Small)),
             )
             .child(
                 Label::new(
-                    "Paste a GitHub token. OTHCloud saves it as one of your GitHub accounts, \
-                     and OTerminal uses it to clone and push.",
+                    "Paste a GitHub personal access token — classic with the repo, workflow \
+                     and read:org scopes, or fine-grained. OTerminal checks it with GitHub and \
+                     keeps it in the system credential store on this PC (Windows Credential \
+                     Manager), never in settings files.",
                 )
                 .size(LabelSize::Small)
                 .color(Color::Muted),
@@ -203,19 +243,56 @@ impl Render for GithubTokenModal {
             .when_some(self.error.clone(), |this, error| {
                 this.child(Label::new(error).size(LabelSize::Small).color(Color::Error))
             })
+            .when(signed_in, |this| {
+                this.child(
+                    Checkbox::new(
+                        "github-token-save-to-othcloud",
+                        ToggleState::from(self.save_to_othcloud),
+                    )
+                    .label("Also save to OTHCloud (so OTHCloud can deploy from it)")
+                    .on_click(cx.listener(
+                        |this, state: &ToggleState, _, cx| {
+                            this.save_to_othcloud = state.selected();
+                            cx.notify();
+                        },
+                    )),
+                )
+            })
             .child(
                 h_flex()
                     .justify_between()
                     .child(
-                        Button::new("create-github-token", "Create a token on GitHub")
-                            .style(ButtonStyle::Subtle)
-                            .label_size(LabelSize::Small)
-                            .end_icon(
-                                Icon::new(IconName::ArrowUpRight)
-                                    .size(IconSize::XSmall)
-                                    .color(Color::Muted),
+                        h_flex()
+                            .gap_1()
+                            .child(
+                                Button::new("create-github-token", "Create a token")
+                                    .style(ButtonStyle::Subtle)
+                                    .label_size(LabelSize::Small)
+                                    .end_icon(
+                                        Icon::new(IconName::ArrowUpRight)
+                                            .size(IconSize::XSmall)
+                                            .color(Color::Muted),
+                                    )
+                                    .on_click(|_, _, cx| cx.open_url(github_api::CREATE_TOKEN_URL)),
                             )
-                            .on_click(|_, _, cx| cx.open_url(CREATE_TOKEN_URL)),
+                            .when(browser_sign_in, |this| {
+                                this.child(
+                                    Button::new("github-browser-sign-in", "Use the browser")
+                                        .style(ButtonStyle::Subtle)
+                                        .label_size(LabelSize::Small)
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            let workspace = this.workspace.clone();
+                                            cx.emit(DismissEvent);
+                                            window.defer(cx, move |window, cx| {
+                                                if let Some(workspace) = workspace.upgrade() {
+                                                    window.focus(&workspace.focus_handle(cx), cx);
+                                                }
+                                                window
+                                                    .dispatch_action(Box::new(SignInToGithub), cx);
+                                            });
+                                        })),
+                                )
+                            }),
                     )
                     .child(
                         h_flex()
@@ -228,7 +305,11 @@ impl Render for GithubTokenModal {
                             .child(
                                 Button::new(
                                     "save-github-token",
-                                    if self.saving { "Saving…" } else { "Sign In" },
+                                    if self.saving {
+                                        "Checking…"
+                                    } else {
+                                        "Add Account"
+                                    },
                                 )
                                 .style(ButtonStyle::Filled)
                                 .disabled(self.saving)
@@ -254,24 +335,28 @@ mod tests {
     fn maps_server_errors() {
         let host = "othcloud.xyz";
         assert_eq!(
-            sign_in_error_message(&error(400, "invalid_token"), host),
+            othcloud_save_error_message(&error(400, "invalid_token"), host),
             "GitHub rejected that token."
         );
         assert_eq!(
-            sign_in_error_message(&error(400, "missing_repo_scope"), host),
+            othcloud_save_error_message(&error(400, "missing_repo_scope"), host),
             "The token needs the repo scope."
         );
         assert_eq!(
-            sign_in_error_message(&error(409, "linked_to_other_user"), host),
+            othcloud_save_error_message(&error(409, "linked_to_other_user"), host),
             "That GitHub account is linked to another OTHCloud user."
         );
         assert_eq!(
-            sign_in_error_message(&error(405, "method_not_allowed"), host),
+            othcloud_save_error_message(&error(405, "method_not_allowed"), host),
             "This OTHCloud server can't save GitHub accounts yet."
         );
         assert_eq!(
-            sign_in_error_message(&error(404, "HTTP 404"), host),
+            othcloud_save_error_message(&error(404, "HTTP 404"), host),
             "This OTHCloud server can't save GitHub accounts yet."
+        );
+        assert_eq!(
+            othcloud_save_error_message(&ApiError::network(), host),
+            "Can't reach othcloud.xyz"
         );
     }
 }

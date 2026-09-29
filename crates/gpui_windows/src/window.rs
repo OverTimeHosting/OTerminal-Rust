@@ -941,6 +941,14 @@ impl PlatformWindow for WindowsWindow {
         unsafe { ShowWindowAsync(self.0.hwnd, SW_MINIMIZE).ok().log_err() };
     }
 
+    fn set_visible(&self, visible: bool) {
+        // `SW_HIDE` takes the window off the screen and the taskbar while
+        // keeping its placement (size, position, maximized state); `SW_SHOWNA`
+        // brings it back as it was without taking activation.
+        let command = if visible { SW_SHOWNA } else { SW_HIDE };
+        unsafe { ShowWindowAsync(self.0.hwnd, command).ok().log_err() };
+    }
+
     fn zoom(&self) {
         unsafe {
             if IsWindowVisible(self.0.hwnd).as_bool() {

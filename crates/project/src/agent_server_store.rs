@@ -27,7 +27,10 @@ use url::Url;
 use util::{ResultExt as _, debug_panic};
 
 use crate::ProjectEnvironment;
-use crate::agent_registry_store::{AgentRegistryStore, RegistryAgent, RegistryTargetConfig};
+use crate::agent_registry_store::{
+    AgentRegistryStore, RegistryAgent, RegistryAgentMetadata, RegistryNpxAgent,
+    RegistryTargetConfig,
+};
 
 use crate::worktree_store::WorktreeStore;
 
@@ -191,6 +194,37 @@ pub struct AgentServerStore {
 pub struct AgentServersUpdated;
 
 impl EventEmitter<AgentServersUpdated> for AgentServerStore {}
+
+/// OTerminal: the ACP registry id of Claude Code (the `@agentclientprotocol/claude-agent-acp`
+/// adapter), the one agent the agent panel runs.
+pub const CLAUDE_CODE_AGENT_ID: &str = "claude-acp";
+/// OTerminal: the name shown for [`CLAUDE_CODE_AGENT_ID`].
+pub const CLAUDE_CODE_DISPLAY_NAME: &str = "Claude Code";
+/// The Claude Code adapter used when the ACP registry has not been fetched
+/// yet. Same npm package the registry points at; the registry entry wins
+/// once it is available.
+const CLAUDE_CODE_FALLBACK_PACKAGE: &str = "@agentclientprotocol/claude-agent-acp";
+const CLAUDE_CODE_FALLBACK_VERSION: &str = "0.84.0";
+
+fn claude_code_fallback_registry_agent() -> RegistryAgent {
+    RegistryAgent::Npx(RegistryNpxAgent {
+        metadata: RegistryAgentMetadata {
+            id: AgentId::new(CLAUDE_CODE_AGENT_ID),
+            name: SharedString::new_static(CLAUDE_CODE_DISPLAY_NAME),
+            description: SharedString::new_static("Claude Code over the Agent Client Protocol"),
+            version: SharedString::new_static(CLAUDE_CODE_FALLBACK_VERSION),
+            repository: Some(SharedString::new_static(
+                "https://github.com/agentclientprotocol/claude-agent-acp",
+            )),
+            website: None,
+            license_url: None,
+            icon_path: None,
+        },
+        package: format!("{CLAUDE_CODE_FALLBACK_PACKAGE}@{CLAUDE_CODE_FALLBACK_VERSION}").into(),
+        args: Vec::new(),
+        env: HashMap::default(),
+    })
+}
 
 static EXTENSION_TO_REGISTRY_IDS: LazyLock<HashMap<&'static str, &'static str>> =
     LazyLock::new(|| {
@@ -374,11 +408,28 @@ impl AgentServerStore {
                     );
                 }
                 CustomAgentServerSettings::Registry { env, .. } => {
-                    let Some(agent) = registry_agents_by_id.get(name) else {
-                        if registry_store.is_some() {
-                            log::debug!("Registry agent '{}' not found in ACP registry", name);
+                    // OTerminal: Claude Code must not depend on the registry
+                    // being reachable (first launch offline, CDN down), so it
+                    // falls back to a built-in entry for the same npm package.
+                    let claude_code_fallback;
+                    let agent = match registry_agents_by_id.get(name) {
+                        Some(agent) => agent,
+                        None if name == CLAUDE_CODE_AGENT_ID => {
+                            claude_code_fallback = claude_code_fallback_registry_agent();
+                            &claude_code_fallback
                         }
-                        continue;
+                        None => {
+                            if registry_store.is_some() {
+                                log::debug!("Registry agent '{}' not found in ACP registry", name);
+                            }
+                            continue;
+                        }
+                    };
+                    // OTerminal: the registry calls it "Claude Agent".
+                    let display_name = if name == CLAUDE_CODE_AGENT_ID {
+                        SharedString::new_static(CLAUDE_CODE_DISPLAY_NAME)
+                    } else {
+                        agent.metadata().name.clone()
                     };
 
                     let agent_name = AgentId(name.clone().into());
@@ -412,7 +463,7 @@ impl AgentServerStore {
                                         as Box<dyn ExternalAgentServer>,
                                     ExternalAgentSource::Registry,
                                     agent.metadata.icon_path.clone(),
-                                    Some(agent.metadata.name.clone()),
+                                    Some(display_name.clone()),
                                 ),
                             );
                         }
@@ -435,7 +486,7 @@ impl AgentServerStore {
                                         as Box<dyn ExternalAgentServer>,
                                     ExternalAgentSource::Registry,
                                     agent.metadata.icon_path.clone(),
-                                    Some(agent.metadata.name.clone()),
+                                    Some(display_name.clone()),
                                 ),
                             );
                         }

@@ -48,11 +48,7 @@ impl Render for OthcloudStatusItem {
             .child(
                 h_flex()
                     .gap_1()
-                    .child(
-                        Icon::new(IconName::Othcloud)
-                            .size(IconSize::Small)
-                            .color(Color::Muted),
-                    )
+                    .child(gpui::img("images/oth_logo.png").flex_none().size(px(14.)))
                     .child(Label::new(label).size(LabelSize::Small).color(Color::Muted)),
             )
             .tooltip(Tooltip::text(if signed_in {

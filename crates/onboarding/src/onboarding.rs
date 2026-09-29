@@ -15,7 +15,7 @@ use serde::Deserialize;
 use settings::{SettingsStore, VsCodeSettingsSource};
 use std::sync::Arc;
 use ui::{
-    Divider, KeyBinding, ParentElement as _, StatefulInteractiveElement, Vector, VectorName,
+    Divider, KeyBinding, ParentElement as _, StatefulInteractiveElement,
     WithScrollbar as _, prelude::*, rems_from_px,
 };
 
@@ -347,7 +347,11 @@ impl Render for Onboarding {
                                     .child(
                                         h_flex()
                                             .gap_4()
-                                            .child(Vector::square(VectorName::OterminalLogo, rems(2.5)))
+                                            .child(
+                                                gpui::img("images/oterminal_logo.png")
+                                                    .flex_none()
+                                                    .size(rems(2.5)),
+                                            )
                                             .child(
                                                 v_flex()
                                                     .child(

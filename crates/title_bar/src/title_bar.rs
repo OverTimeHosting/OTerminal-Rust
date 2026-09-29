@@ -34,7 +34,7 @@ use command_palette_hooks::CommandPaletteFilter;
 use gpui::{
     Action, Anchor, AnyElement, App, Context, Element, Entity, Focusable, InteractiveElement,
     IntoElement, MouseButton, ParentElement, Render, StatefulInteractiveElement, Styled,
-    StyledImage, Subscription, TaskExt, WeakEntity, Window, actions, div, img, px,
+    FontWeight, Subscription, TaskExt, WeakEntity, Window, actions, div,
 };
 use onboarding_banner::OnboardingBanner;
 use project::{
@@ -230,16 +230,13 @@ pub struct TitleBar {
     project_tabs: Option<Entity<ProjectTabs>>,
 }
 
-/// The OTH logo shown at the start of the title bar.
+/// The product name shown at the start of the title bar.
 fn render_logo() -> impl IntoElement {
-    div()
-        .flex_none()
-        .px_1()
-        .child(img("images/oth_logo.png").size(px(16.)).with_fallback(|| {
-            Icon::new(IconName::Othcloud)
-                .size(IconSize::Small)
-                .into_any_element()
-        }))
+    div().flex_none().px_1().child(
+        Label::new("OTerminal")
+            .size(LabelSize::Small)
+            .weight(FontWeight::SEMIBOLD),
+    )
 }
 
 impl Render for TitleBar {

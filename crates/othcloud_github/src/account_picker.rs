@@ -1,75 +1,58 @@
-//! "Switch GitHub account": lists the GitHub accounts OTHCloud knows for the
-//! user and makes OTerminal use the picked one for git.
+//! "Switch GitHub account": one list of the GitHub accounts stored on this PC
+//! and the ones linked on OTHCloud, plus ways to add more. The picked account
+//! is what OTerminal uses for git on github.com.
 
 use std::sync::Arc;
 
 use gpui::{
     App, AppContext as _, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    Render, SharedString, Task, WeakEntity, Window,
+    Render, SharedString, Subscription, Task, WeakEntity, Window,
 };
-use othcloud_client::{GithubAccount, GithubTokenKind, OthcloudApi};
+use othcloud_client::{GithubAccount, GithubTokenKind, OthcloudAccount};
 use picker::{Picker, PickerDelegate};
-use ui::{IconButton, ListItem, ListItemSpacing, Tooltip, prelude::*};
+use ui::{Avatar, IconButton, ListItem, ListItemSpacing, Tooltip, prelude::*};
 use workspace::{ModalView, Workspace};
 
-use crate::{ConnectGithub, GithubAccountStore, SignInToGithub, show_status};
+use crate::{
+    AddGithubToken, ConnectGithub, GithubAccountStore, LocalGithubAccount, ResolvedAccount,
+    SignInToGithub, handle_othcloud_unauthorized, oauth_client_id, othcloud_api,
+    othcloud_signed_in, show_status,
+};
 
 pub struct GithubAccountPicker {
     picker: Entity<Picker<GithubAccountPickerDelegate>>,
+    _subscription: Option<Subscription>,
 }
 
 impl GithubAccountPicker {
     pub fn new(
         workspace: WeakEntity<Workspace>,
-        api: Arc<OthcloudApi>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let delegate =
-            GithubAccountPickerDelegate::new(cx.entity().downgrade(), workspace, api.clone(), cx);
-        let picker = cx.new(|cx| Picker::list(delegate, window, cx).initial_width(rems(34.)));
-        let this = Self { picker };
-        this.load_accounts(window, cx);
-        this
-    }
-
-    fn load_accounts(&self, window: &mut Window, cx: &mut Context<Self>) {
-        let picker = self.picker.clone();
-        let api = picker.read(cx).delegate.api.clone();
-        let load = cx.background_spawn(async move { api.github_accounts().await });
-        let task = cx.spawn_in(window, async move |_, cx| {
-            let result = load.await;
-            picker
-                .update_in(cx, |picker, window, cx| {
-                    let delegate = &mut picker.delegate;
-                    delegate.loading = false;
-                    match result {
-                        Ok(Some(response)) => {
-                            delegate.accounts = Some(response.accounts);
-                            delegate.connect_available = response.connect_available;
-                            delegate.load_error = None;
-                        }
-                        Ok(None) => {
-                            // An older OTHCloud: only the current account is known.
-                            delegate.accounts = None;
-                            delegate.connect_available = true;
-                            delegate.load_error = None;
-                        }
-                        Err(error) => {
-                            if error.is_unauthorized() {
-                                handle_unauthorized(cx);
-                            }
-                            delegate.load_error =
-                                Some(error.friendly_message(delegate.api.host()).into());
-                        }
-                    }
-                    picker.refresh(window, cx);
-                })
-                .ok();
+        let delegate = GithubAccountPickerDelegate {
+            picker: cx.entity().downgrade(),
+            workspace,
+            matches: Vec::new(),
+            selected_index: 0,
+        };
+        let picker = cx.new(|cx| Picker::list(delegate, window, cx).initial_width(rems(36.)));
+        let store = GithubAccountStore::global(cx);
+        let subscription = store.as_ref().map(|store| {
+            let picker = picker.clone();
+            cx.subscribe_in(store, window, move |_, _, _, window, cx| {
+                picker.update(cx, |picker, cx| picker.refresh(window, cx));
+            })
         });
-        self.picker.update(cx, |picker, _| {
-            picker.delegate._load_task = Some(task);
-        });
+        if let Some(store) = store
+            && othcloud_signed_in(cx)
+        {
+            store.update(cx, |store, cx| store.refresh_othcloud_accounts(cx));
+        }
+        Self {
+            picker,
+            _subscription: subscription,
+        }
     }
 }
 
@@ -77,7 +60,7 @@ impl Render for GithubAccountPicker {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .key_context("GithubAccountPicker")
-            .w(rems(34.))
+            .w(rems(36.))
             .child(self.picker.clone())
     }
 }
@@ -93,111 +76,220 @@ impl ModalView for GithubAccountPicker {}
 
 #[derive(Clone, Debug)]
 enum Entry {
-    Account(GithubAccount),
-    /// The account in use, when the server can't list accounts.
-    Current {
+    Header(SharedString),
+    /// A status line (loading, error) under a header.
+    Note(SharedString),
+    Local(LocalGithubAccount),
+    Othcloud(GithubAccount),
+    /// The OTHCloud account in use, when the server can't list accounts.
+    OthcloudCurrent {
         label: String,
     },
-    SignIn,
+    NoAccount,
+    SignInWithBrowser,
+    AddToken,
     ConnectOnWebsite,
+    SignInToOthcloud,
+}
+
+impl Entry {
+    fn is_selectable(&self) -> bool {
+        !matches!(self, Entry::Header(_) | Entry::Note(_))
+    }
+
+    fn search_text(&self) -> Option<String> {
+        match self {
+            Entry::Local(account) => Some(format!(
+                "{} {}",
+                account.login,
+                account.name.as_deref().unwrap_or_default()
+            )),
+            Entry::Othcloud(account) => Some(format!(
+                "{} {}",
+                account.label,
+                account.login.as_deref().unwrap_or_default()
+            )),
+            Entry::OthcloudCurrent { label } => Some(label.clone()),
+            _ => None,
+        }
+    }
 }
 
 pub struct GithubAccountPickerDelegate {
     picker: WeakEntity<GithubAccountPicker>,
     workspace: WeakEntity<Workspace>,
-    api: Arc<OthcloudApi>,
-    accounts: Option<Vec<GithubAccount>>,
-    connect_available: bool,
-    loading: bool,
-    load_error: Option<SharedString>,
-    /// The account id in use when the picker opened.
-    active_id: Option<String>,
-    current_label: Option<String>,
     matches: Vec<Entry>,
     selected_index: usize,
-    _load_task: Option<Task<()>>,
+}
+
+fn github_id_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(id) if !id.is_empty() => Some(id.clone()),
+        serde_json::Value::Number(id) => Some(id.to_string()),
+        _ => None,
+    }
 }
 
 impl GithubAccountPickerDelegate {
-    fn new(
-        picker: WeakEntity<GithubAccountPicker>,
-        workspace: WeakEntity<Workspace>,
-        api: Arc<OthcloudApi>,
-        cx: &App,
-    ) -> Self {
-        let store = GithubAccountStore::global(cx);
-        let (active_id, current_label) = store
-            .map(|store| {
-                let store = store.read(cx);
-                (
-                    store.active_account_id().map(ToString::to_string),
-                    store.active_account().map(|active| active.display_name()),
-                )
-            })
-            .unwrap_or_default();
-        Self {
-            picker,
-            workspace,
-            api,
-            accounts: None,
-            connect_available: true,
-            loading: true,
-            load_error: None,
-            active_id,
-            current_label,
-            matches: Vec::new(),
-            selected_index: 0,
-            _load_task: None,
-        }
-    }
-
-    fn all_entries(&self) -> Vec<Entry> {
+    fn all_entries(&self, cx: &App) -> Vec<Entry> {
         let mut entries = Vec::new();
-        match &self.accounts {
-            Some(accounts) => {
-                entries.extend(accounts.iter().cloned().map(Entry::Account));
-            }
-            None if !self.loading => {
-                if let Some(label) = &self.current_label {
-                    entries.push(Entry::Current {
-                        label: label.clone(),
+        let Some(store) = GithubAccountStore::global(cx) else {
+            return entries;
+        };
+        let store = store.read(cx);
+        let signed_in = othcloud_signed_in(cx);
+
+        entries.push(Entry::Header("On this PC".into()));
+        let local_ids: Vec<String> = store
+            .local_accounts()
+            .iter()
+            .map(|account| account.id.to_string())
+            .collect();
+        entries.extend(store.local_accounts().iter().cloned().map(Entry::Local));
+        if oauth_client_id(cx).is_some() {
+            entries.push(Entry::SignInWithBrowser);
+        }
+        entries.push(Entry::AddToken);
+
+        entries.push(Entry::Header("OTHCloud".into()));
+        if signed_in {
+            match store.othcloud_accounts() {
+                Some(accounts) => {
+                    // An account saved both here and on OTHCloud shows once,
+                    // as the local one.
+                    let accounts = accounts.iter().filter(|account| {
+                        !(account.kind == GithubTokenKind::User
+                            && github_id_string(&account.github_id)
+                                .is_some_and(|id| local_ids.contains(&id)))
                     });
+                    entries.extend(accounts.cloned().map(Entry::Othcloud));
+                }
+                None if store.othcloud_accounts_loading() => {
+                    entries.push(Entry::Note("Loading OTHCloud accounts…".into()));
+                }
+                None => {
+                    if let Some(active) = store.active_account().filter(|active| !active.is_local())
+                    {
+                        entries.push(Entry::OthcloudCurrent {
+                            label: active.display_name(),
+                        });
+                    }
                 }
             }
-            None => {}
+            if let Some(error) = store.othcloud_accounts_error() {
+                entries.push(Entry::Note(error.clone()));
+            }
+            if store.othcloud_connect_available() {
+                entries.push(Entry::ConnectOnWebsite);
+            }
+        } else {
+            entries.push(Entry::SignInToOthcloud);
         }
-        entries.push(Entry::SignIn);
-        if self.connect_available {
-            entries.push(Entry::ConnectOnWebsite);
-        }
+
+        entries.push(Entry::Header("Without an account".into()));
+        entries.push(Entry::NoAccount);
         entries
     }
 
-    fn remove_account(&mut self, account: GithubAccount, cx: &mut Context<Picker<Self>>) {
-        let api = self.api.clone();
+    fn is_active(&self, entry: &Entry, cx: &App) -> bool {
+        let Some(store) = GithubAccountStore::global(cx) else {
+            return false;
+        };
+        let store = store.read(cx);
+        match (entry, store.resolved(cx)) {
+            (Entry::Local(account), ResolvedAccount::Local(id)) => account.id == id,
+            (Entry::Othcloud(account), ResolvedAccount::Othcloud) => {
+                store.active_account_id() == Some(account.id.as_str())
+            }
+            (Entry::OthcloudCurrent { .. }, ResolvedAccount::Othcloud) => true,
+            (Entry::NoAccount, ResolvedAccount::None) => true,
+            _ => false,
+        }
+    }
+
+    fn toast(&self, message: impl Into<SharedString>, is_error: bool, cx: &mut App) {
+        let message = message.into();
+        self.workspace
+            .update(cx, |workspace, cx| {
+                show_status(workspace, message, is_error, cx)
+            })
+            .ok();
+    }
+}
+
+/// Fetches a token for the OTHCloud GitHub account `account` and makes it the
+/// active account, reporting the outcome as a toast in `workspace`.
+pub(crate) fn switch_to_othcloud_account(
+    workspace: WeakEntity<Workspace>,
+    account: GithubAccount,
+    cx: &mut App,
+) {
+    let Some(api) = othcloud_api(cx) else {
+        return;
+    };
+    let id = account.id.clone();
+    let host = api.host().to_string();
+    let fetch = cx.background_spawn(async move { api.github_token(Some(&id)).await });
+    cx.spawn(async move |cx| {
+        let message = match fetch.await {
+            Ok(response) if !response.token.is_empty() => {
+                cx.update(|cx| {
+                    if let Some(store) = GithubAccountStore::global(cx) {
+                        store.update(cx, |store, cx| {
+                            store.use_othcloud_account(Some(account.id.clone()), Some(response), cx)
+                        });
+                    }
+                });
+                Ok(format!("OTerminal now uses GitHub as {}", account.label))
+            }
+            Ok(_) => Err("OTHCloud has no GitHub token for that account.".to_string()),
+            Err(error) if error.is_unauthorized() => {
+                cx.update(handle_othcloud_unauthorized);
+                return;
+            }
+            Err(error) => Err(match error.status {
+                409 => format!(
+                    "GitHub no longer accepts the token of {}. Sign in to it again.",
+                    account.label
+                ),
+                404 => "That GitHub account is no longer on OTHCloud.".to_string(),
+                _ => error.friendly_message(&host),
+            }),
+        };
+        workspace
+            .update(cx, |workspace, cx| match message {
+                Ok(message) => show_status(workspace, message, false, cx),
+                Err(message) => show_status(workspace, message, true, cx),
+            })
+            .ok();
+    })
+    .detach();
+}
+
+impl GithubAccountPickerDelegate {
+    fn remove_othcloud_account(&mut self, account: GithubAccount, cx: &mut Context<Picker<Self>>) {
+        let Some(api) = othcloud_api(cx) else {
+            return;
+        };
         let workspace = self.workspace.clone();
+        let host = api.host().to_string();
         let id = account.id.clone();
         let removal = cx.background_spawn(async move { api.remove_github_account(&id).await });
-        cx.spawn(async move |picker, cx| {
+        cx.spawn(async move |_, cx| {
             let result = removal.await;
-            let message = match &result {
+            let error = match &result {
                 Ok(()) => None,
                 Err(error) if error.status == 409 => Some(
                     "That GitHub account is how you sign in to OTHCloud, so it can't be removed."
                         .to_string(),
                 ),
                 Err(error) if error.is_unauthorized() => {
-                    cx.update(handle_unauthorized);
+                    cx.update(handle_othcloud_unauthorized);
                     return;
                 }
-                Err(error) => {
-                    let host = picker
-                        .read_with(cx, |picker, _| picker.delegate.api.host().to_string())
-                        .unwrap_or_default();
-                    Some(error.friendly_message(&host))
-                }
+                Err(error) => Some(error.friendly_message(&host)),
             };
-            if let Some(message) = message {
+            if let Some(message) = error {
                 workspace
                     .update(cx, |workspace, cx| {
                         show_status(workspace, message, true, cx)
@@ -205,36 +297,23 @@ impl GithubAccountPickerDelegate {
                     .ok();
                 return;
             }
-
-            // Removed: drop it from the list, and stop using it if it was active.
-            let was_active = picker
-                .update(cx, |picker, cx| {
-                    let delegate = &mut picker.delegate;
-                    if let Some(accounts) = delegate.accounts.as_mut() {
-                        accounts.retain(|existing| existing.id != account.id);
-                    }
-                    let was_active = delegate.active_id.as_deref() == Some(account.id.as_str());
-                    if was_active {
-                        delegate.active_id = None;
-                    }
-                    delegate.matches = delegate.all_entries();
-                    delegate.selected_index = delegate
-                        .selected_index
-                        .min(delegate.matches.len().saturating_sub(1));
-                    cx.notify();
-                    was_active
-                })
-                .unwrap_or(false);
             cx.update(|cx| {
-                if was_active && let Some(store) = GithubAccountStore::global(cx) {
-                    store.update(cx, |store, cx| store.use_default_account(cx));
+                if let Some(store) = GithubAccountStore::global(cx) {
+                    store.update(cx, |store, cx| {
+                        let was_active = store.resolved(cx) == ResolvedAccount::Othcloud
+                            && store.active_account_id() == Some(account.id.as_str());
+                        if was_active {
+                            store.use_othcloud_account(None, None, cx);
+                        }
+                        store.refresh_othcloud_accounts(cx);
+                    });
                 }
             });
             workspace
                 .update(cx, |workspace, cx| {
                     show_status(
                         workspace,
-                        format!("Removed GitHub account {}", account.label),
+                        format!("Removed GitHub account {} from OTHCloud", account.label),
                         false,
                         cx,
                     )
@@ -244,75 +323,52 @@ impl GithubAccountPickerDelegate {
         .detach();
     }
 
-    fn switch_to(&self, account: GithubAccount, cx: &mut Context<Picker<Self>>) {
-        let api = self.api.clone();
+    fn remove_local_account(
+        &mut self,
+        account: LocalGithubAccount,
+        cx: &mut Context<Picker<Self>>,
+    ) {
+        if let Some(store) = GithubAccountStore::global(cx) {
+            store
+                .update(cx, |store, cx| store.remove_local_account(account.id, cx))
+                .detach();
+        }
+        self.toast(
+            format!(
+                "Removed GitHub account {} and deleted its token from this PC",
+                account.login
+            ),
+            false,
+            cx,
+        );
+    }
+
+    fn first_selectable(&self, from: usize) -> usize {
+        self.matches
+            .iter()
+            .enumerate()
+            .skip(from)
+            .find(|(_, entry)| entry.is_selectable())
+            .map_or(0, |(ix, _)| ix)
+    }
+
+    fn dispatch_after_dismiss(
+        &self,
+        action: Box<dyn gpui::Action>,
+        window: &mut Window,
+        cx: &mut Context<Picker<Self>>,
+    ) {
         let workspace = self.workspace.clone();
-        let id = account.id.clone();
-        let fetch = cx.background_spawn(async move { api.github_token(Some(&id)).await });
-        let host = self.api.host().to_string();
-        cx.spawn(async move |_, cx| match fetch.await {
-            Ok(response) if !response.token.is_empty() => {
-                cx.update(|cx| {
-                    if let Some(store) = GithubAccountStore::global(cx) {
-                        store.update(cx, |store, cx| {
-                            store.use_account(account.id.clone(), response, cx)
-                        });
-                    }
-                });
-                workspace
-                    .update(cx, |workspace, cx| {
-                        show_status(
-                            workspace,
-                            format!("OTerminal now uses GitHub as {}", account.label),
-                            false,
-                            cx,
-                        )
-                    })
-                    .ok();
+        window.defer(cx, move |window, cx| {
+            if let Some(workspace) = workspace.upgrade() {
+                window.focus(&workspace.focus_handle(cx), cx);
             }
-            Ok(_) => {
-                workspace
-                    .update(cx, |workspace, cx| {
-                        show_status(
-                            workspace,
-                            "OTHCloud has no GitHub token for that account.",
-                            true,
-                            cx,
-                        )
-                    })
-                    .ok();
-            }
-            Err(error) => {
-                if error.is_unauthorized() {
-                    cx.update(handle_unauthorized);
-                    return;
-                }
-                let message = match error.status {
-                    409 => format!(
-                        "GitHub no longer accepts the token of {}. Sign in to it again.",
-                        account.label
-                    ),
-                    404 => "That GitHub account is no longer on OTHCloud.".to_string(),
-                    _ => error.friendly_message(&host),
-                };
-                workspace
-                    .update(cx, |workspace, cx| {
-                        show_status(workspace, message, true, cx)
-                    })
-                    .ok();
-            }
-        })
-        .detach();
+            window.dispatch_action(action, cx);
+        });
     }
 }
 
-fn handle_unauthorized(cx: &mut App) {
-    if let Some(account) = othcloud_client::OthcloudAccount::global(cx) {
-        account.update(cx, |account, cx| account.handle_unauthorized(cx));
-    }
-}
-
-fn account_description(account: &GithubAccount) -> String {
+fn othcloud_account_description(account: &GithubAccount) -> String {
     let mut description =
         if account.kind == GithubTokenKind::Installation || account.id.starts_with("app:") {
             "organization GitHub App".to_string()
@@ -330,8 +386,30 @@ fn account_description(account: &GithubAccount) -> String {
     description
 }
 
+fn local_account_description(account: &LocalGithubAccount) -> String {
+    let mut parts = Vec::new();
+    if let Some(name) = account
+        .name
+        .as_deref()
+        .filter(|name| *name != account.login)
+    {
+        parts.push(name.to_string());
+    }
+    parts.push(
+        match account.source.as_deref() {
+            Some("device") => "signed in with GitHub",
+            _ => "personal access token",
+        }
+        .to_string(),
+    );
+    if account.saved_to_othcloud {
+        parts.push("also on OTHCloud".to_string());
+    }
+    parts.join(" · ")
+}
+
 impl PickerDelegate for GithubAccountPickerDelegate {
-    type ListItem = ListItem;
+    type ListItem = AnyElement;
 
     fn name() -> &'static str {
         "github account picker"
@@ -342,13 +420,7 @@ impl PickerDelegate for GithubAccountPickerDelegate {
     }
 
     fn no_matches_text(&self, _window: &mut Window, _cx: &mut App) -> Option<SharedString> {
-        if self.loading {
-            Some("Loading GitHub accounts…".into())
-        } else {
-            self.load_error
-                .clone()
-                .or_else(|| Some("No GitHub accounts".into()))
-        }
+        Some("No GitHub accounts match".into())
     }
 
     fn match_count(&self) -> usize {
@@ -368,40 +440,37 @@ impl PickerDelegate for GithubAccountPickerDelegate {
         self.selected_index = ix;
     }
 
+    fn can_select(&self, ix: usize, _window: &mut Window, _cx: &mut Context<Picker<Self>>) -> bool {
+        self.matches.get(ix).is_some_and(Entry::is_selectable)
+    }
+
     fn update_matches(
         &mut self,
         query: String,
         _window: &mut Window,
-        _cx: &mut Context<Picker<Self>>,
+        cx: &mut Context<Picker<Self>>,
     ) -> Task<()> {
         let query = query.trim().to_lowercase();
-        let entries = self.all_entries();
+        let entries = self.all_entries(cx);
         self.matches = if query.is_empty() {
             entries
         } else {
             entries
                 .into_iter()
-                .filter(|entry| match entry {
-                    Entry::Account(account) => {
-                        account.label.to_lowercase().contains(&query)
-                            || account
-                                .login
-                                .as_deref()
-                                .is_some_and(|login| login.to_lowercase().contains(&query))
-                    }
-                    Entry::Current { label } => label.to_lowercase().contains(&query),
-                    Entry::SignIn | Entry::ConnectOnWebsite => true,
+                .filter(|entry| {
+                    entry
+                        .search_text()
+                        .is_some_and(|text| text.to_lowercase().contains(&query))
                 })
                 .collect()
         };
-        let active_ix = self.matches.iter().position(|entry| match entry {
-            Entry::Account(account) => self.active_id.as_deref() == Some(account.id.as_str()),
-            _ => false,
-        });
-        self.selected_index = if query.is_empty() {
-            active_ix.unwrap_or(0)
-        } else {
-            0
+        let active_ix = self
+            .matches
+            .iter()
+            .position(|entry| self.is_active(entry, cx));
+        self.selected_index = match active_ix {
+            Some(ix) if query.is_empty() => ix,
+            _ => self.first_selectable(0),
         };
         Task::ready(())
     }
@@ -410,24 +479,50 @@ impl PickerDelegate for GithubAccountPickerDelegate {
         let Some(entry) = self.matches.get(self.selected_index).cloned() else {
             return;
         };
+        let already_active = self.is_active(&entry, cx);
         match entry {
-            Entry::Account(account) => {
-                if self.active_id.as_deref() != Some(account.id.as_str()) {
-                    self.switch_to(account, cx);
+            Entry::Header(_) | Entry::Note(_) => return,
+            Entry::Local(account) => {
+                if !already_active && let Some(store) = GithubAccountStore::global(cx) {
+                    store.update(cx, |store, cx| store.use_local_account(account.id, cx));
+                    self.toast(
+                        format!("OTerminal now uses GitHub as {}", account.login),
+                        false,
+                        cx,
+                    );
                 }
             }
-            Entry::Current { .. } => {}
-            Entry::SignIn => {
-                let workspace = self.workspace.clone();
-                window.defer(cx, move |window, cx| {
-                    if let Some(workspace) = workspace.upgrade() {
-                        window.focus(&workspace.focus_handle(cx), cx);
-                    }
-                    window.dispatch_action(Box::new(SignInToGithub), cx);
-                });
+            Entry::Othcloud(account) => {
+                if !already_active {
+                    switch_to_othcloud_account(self.workspace.clone(), account, cx);
+                }
             }
+            Entry::OthcloudCurrent { .. } => {
+                if !already_active && let Some(store) = GithubAccountStore::global(cx) {
+                    store.update(cx, |store, cx| store.use_othcloud_account(None, None, cx));
+                }
+            }
+            Entry::NoAccount => {
+                if !already_active && let Some(store) = GithubAccountStore::global(cx) {
+                    store.update(cx, |store, cx| store.use_no_account(cx));
+                    self.toast(
+                        "Git now uses your own credential manager for GitHub",
+                        false,
+                        cx,
+                    );
+                }
+            }
+            Entry::SignInWithBrowser => {
+                self.dispatch_after_dismiss(Box::new(SignInToGithub), window, cx)
+            }
+            Entry::AddToken => self.dispatch_after_dismiss(Box::new(AddGithubToken), window, cx),
             Entry::ConnectOnWebsite => {
-                window.dispatch_action(Box::new(ConnectGithub), cx);
+                self.dispatch_after_dismiss(Box::new(ConnectGithub), window, cx)
+            }
+            Entry::SignInToOthcloud => {
+                if let Some(account) = OthcloudAccount::global(cx) {
+                    account.update(cx, |account, cx| account.begin_sign_in(cx));
+                }
             }
         }
         self.dismissed(window, cx);
@@ -445,73 +540,162 @@ impl PickerDelegate for GithubAccountPickerDelegate {
         cx: &mut Context<Picker<Self>>,
     ) -> Option<Self::ListItem> {
         let entry = self.matches.get(ix)?;
+        if let Entry::Header(title) = entry {
+            return Some(
+                div()
+                    .px_2p5()
+                    .pt_2()
+                    .pb_0p5()
+                    .child(
+                        Label::new(title.clone())
+                            .size(LabelSize::XSmall)
+                            .color(Color::Muted),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if let Entry::Note(note) = entry {
+            return Some(
+                div()
+                    .px_2p5()
+                    .py_1()
+                    .child(
+                        Label::new(note.clone())
+                            .size(LabelSize::Small)
+                            .color(Color::Muted),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        let is_active = self.is_active(entry, cx);
+        let check = || Icon::new(IconName::Check).color(Color::Accent);
         let item = ListItem::new(ix)
             .inset(true)
             .spacing(ListItemSpacing::Sparse)
             .toggle_state(selected);
+        let two_lines = |title: SharedString, subtitle: String| {
+            v_flex().child(Label::new(title)).child(
+                Label::new(subtitle)
+                    .size(LabelSize::Small)
+                    .color(Color::Muted),
+            )
+        };
         let item = match entry {
-            Entry::Account(account) => {
-                let is_active = self.active_id.as_deref() == Some(account.id.as_str());
-                let icon = if account.kind == GithubTokenKind::Installation {
-                    IconName::Server
-                } else {
-                    IconName::Github
+            Entry::Header(_) | Entry::Note(_) => return None,
+            Entry::Local(account) => {
+                let start = match account.avatar_url.clone() {
+                    Some(url) => Avatar::new(url).size(rems(1.25)).into_any_element(),
+                    None => Icon::new(IconName::Github)
+                        .color(Color::Muted)
+                        .into_any_element(),
                 };
-                let mut item = item.start_slot(Icon::new(icon).color(Color::Muted)).child(
-                    v_flex().child(Label::new(account.label.clone())).child(
-                        Label::new(account_description(account))
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    ),
-                );
-                let removable = account.id.starts_with("user:");
-                let end = h_flex()
-                    .gap_1()
-                    .when(is_active, |this| {
-                        this.child(Icon::new(IconName::Check).color(Color::Accent))
-                    })
-                    .when(removable, |this| {
-                        let account = account.clone();
-                        this.child(
-                            IconButton::new(("remove-github-account", ix), IconName::Trash)
+                let account_for_remove = account.clone();
+                item.start_slot(start)
+                    .child(two_lines(
+                        account.login.clone().into(),
+                        local_account_description(account),
+                    ))
+                    .end_slot(
+                        h_flex()
+                            .gap_1()
+                            .when(is_active, |this| this.child(check()))
+                            .child(
+                                IconButton::new(
+                                    ("remove-local-github-account", ix),
+                                    IconName::Trash,
+                                )
                                 .icon_size(IconSize::Small)
                                 .icon_color(Color::Muted)
-                                .tooltip(Tooltip::text("Remove this GitHub account from OTHCloud"))
-                                .on_click(cx.listener(move |picker, _, _, cx| {
-                                    cx.stop_propagation();
-                                    picker.delegate.remove_account(account.clone(), cx);
-                                })),
-                        )
-                    });
-                item = item.end_slot(end);
-                item
+                                .tooltip(Tooltip::text(
+                                    "Remove this account and delete its token from this PC",
+                                ))
+                                .on_click(cx.listener(
+                                    move |picker, _, _, cx| {
+                                        cx.stop_propagation();
+                                        picker
+                                            .delegate
+                                            .remove_local_account(account_for_remove.clone(), cx);
+                                    },
+                                )),
+                            ),
+                    )
             }
-            Entry::Current { label } => item
+            Entry::Othcloud(account) => {
+                let start = match account.avatar_url.clone() {
+                    Some(url) => Avatar::new(url).size(rems(1.25)).into_any_element(),
+                    None => Icon::new(if account.kind == GithubTokenKind::Installation {
+                        IconName::Server
+                    } else {
+                        IconName::Github
+                    })
+                    .color(Color::Muted)
+                    .into_any_element(),
+                };
+                let removable = account.id.starts_with("user:");
+                let account_for_remove = account.clone();
+                item.start_slot(start)
+                    .child(two_lines(
+                        account.label.clone().into(),
+                        othcloud_account_description(account),
+                    ))
+                    .end_slot(
+                        h_flex()
+                            .gap_1()
+                            .when(is_active, |this| this.child(check()))
+                            .when(removable, |this| {
+                                this.child(
+                                    IconButton::new(
+                                        ("remove-othcloud-github-account", ix),
+                                        IconName::Trash,
+                                    )
+                                    .icon_size(IconSize::Small)
+                                    .icon_color(Color::Muted)
+                                    .tooltip(Tooltip::text(
+                                        "Remove this GitHub account from OTHCloud",
+                                    ))
+                                    .on_click(cx.listener(
+                                        move |picker, _, _, cx| {
+                                            cx.stop_propagation();
+                                            picker.delegate.remove_othcloud_account(
+                                                account_for_remove.clone(),
+                                                cx,
+                                            );
+                                        },
+                                    )),
+                                )
+                            }),
+                    )
+            }
+            Entry::OthcloudCurrent { label } => item
                 .start_slot(Icon::new(IconName::Github).color(Color::Muted))
-                .child(Label::new(label.clone()))
-                .end_slot(Icon::new(IconName::Check).color(Color::Accent)),
-            Entry::SignIn => item
+                .child(two_lines(label.clone().into(), "via OTHCloud".to_string()))
+                .when(is_active, |this| this.end_slot(check())),
+            Entry::NoAccount => item
+                .start_slot(Icon::new(IconName::Close).color(Color::Muted))
+                .child(two_lines(
+                    "No account".into(),
+                    "Git uses your own credential manager for GitHub".to_string(),
+                ))
+                .when(is_active, |this| this.end_slot(check())),
+            Entry::SignInWithBrowser => item
+                .start_slot(Icon::new(IconName::Github).color(Color::Muted))
+                .child(Label::new("Sign in with GitHub in the browser…")),
+            Entry::AddToken => item
                 .start_slot(Icon::new(IconName::Plus).color(Color::Muted))
-                .child(Label::new("Sign in to GitHub in OTerminal…")),
+                .child(Label::new("Add a GitHub account with a token…")),
             Entry::ConnectOnWebsite => item
                 .start_slot(Icon::new(IconName::ArrowUpRight).color(Color::Muted))
                 .child(Label::new(
                     "Connect a GitHub account on the OTHCloud website…",
                 )),
+            Entry::SignInToOthcloud => item
+                .start_slot(Icon::new(IconName::ArrowUpRight).color(Color::Muted))
+                .child(two_lines(
+                    "Sign in to OTHCloud…".into(),
+                    "Use the GitHub accounts linked to your OTHCloud account".to_string(),
+                )),
         };
-        Some(item)
-    }
-
-    fn separators_after_indices(&self) -> Vec<usize> {
-        let accounts = self
-            .matches
-            .iter()
-            .take_while(|entry| matches!(entry, Entry::Account(_) | Entry::Current { .. }))
-            .count();
-        if accounts > 0 && accounts < self.matches.len() {
-            vec![accounts - 1]
-        } else {
-            Vec::new()
-        }
+        Some(item.into_any_element())
     }
 }

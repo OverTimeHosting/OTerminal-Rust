@@ -100,9 +100,20 @@ where
     }
 }
 
+/// OTerminal ships `"disable_ai": true` (Claude Code only mode, see
+/// `DisableAiSettings::claude_code_only`). Upstream agent tests exercise the
+/// full agent panel, so they run with AI enabled. (`disable_ai` saturates,
+/// so this has to change the default rather than the user settings.)
+pub fn enable_ai_for_tests(settings_store: &mut SettingsStore, cx: &mut gpui::App) {
+    settings_store.update_default_settings(cx, |settings| {
+        settings.project.disable_ai = Some(settings::SaturatingBool(false));
+    });
+}
+
 pub fn init_test(cx: &mut TestAppContext) {
     cx.update(|cx| {
-        let settings_store = SettingsStore::test(cx);
+        let mut settings_store = SettingsStore::test(cx);
+        enable_ai_for_tests(&mut settings_store, cx);
         cx.set_global(settings_store);
         // Use an isolated DB so parallel tests can't see each other's
         // persisted records (e.g. created-worktree records).

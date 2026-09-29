@@ -765,6 +765,8 @@ fn main() {
         terminal_view::init(cx);
         othcloud_client::init(cx);
         othcloud_github::init(cx);
+        // `git: clone` opens OTerminal's clone flow (GitHub accounts, repo list, URL).
+        git_ui::set_clone_repository_handler(othcloud_github::open_clone_modal, cx);
         othcloud_panel::init(cx);
         othcloud_terminal_profiles::init(cx);
         project_tabs::init(cx);

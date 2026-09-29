@@ -1,7 +1,6 @@
 use gpui::{App, Menu, MenuItem, OsAction};
 use project::DisableAiSettings;
 use release_channel::ReleaseChannel;
-use settings::Settings;
 use terminal_view::terminal_panel;
 use zed_actions::{Quit, assistant, debug_panel, dev, git_panel, project_panel};
 
@@ -45,9 +44,13 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
         MenuItem::action("Debugger Panel", debug_panel::ToggleFocus),
     ];
 
-    if !DisableAiSettings::get_global(cx).disable_ai {
+    // OTerminal: with `disable_ai` the agent panel runs Claude Code only.
+    if DisableAiSettings::claude_code_only(cx) {
+        view_items.push(MenuItem::action("Claude Code", assistant::ToggleFocus));
+    } else {
         view_items.push(MenuItem::action("Agent Panel", assistant::ToggleFocus));
     }
+    view_items.push(MenuItem::action("New Claude Code Tab", agent_ui::NewClaudeTab));
 
     view_items.extend([
         MenuItem::action("Git Panel", git_panel::ToggleFocus),

@@ -450,6 +450,8 @@ impl PlatformWindow for TestWindow {
         unimplemented!()
     }
 
+    fn set_visible(&self, _visible: bool) {}
+
     fn zoom(&self) {
         unimplemented!()
     }

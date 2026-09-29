@@ -10300,8 +10300,19 @@ pub async fn apply_restored_multiworkspace_state(
         sidebar_open,
         project_groups,
         sidebar_state,
+        project_windows,
         ..
     } = state;
+
+    // OTerminal: extra windows of the project tabs; each reopens when its
+    // project is displayed (right away for the active one).
+    if !project_windows.is_empty() {
+        window_handle
+            .update(cx, |multi_workspace, _window, cx| {
+                multi_workspace.restore_project_windows(project_windows.clone(), cx);
+            })
+            .ok();
+    }
 
     if !project_groups.is_empty() {
         // Resolve linked worktree paths to their main repo paths so
@@ -11782,7 +11793,9 @@ pub(crate) async fn prepare_window_to_close(
 ) -> Result<bool> {
     let active_and_workspaces = window
         .update(cx, |multi_workspace, window, _cx| {
-            if close_intent == CloseIntent::Quit {
+            // OTerminal: a hidden project window stays hidden while quitting;
+            // it is shown only if it has to prompt (see `Window::prompt`).
+            if close_intent == CloseIntent::Quit && !window.is_window_hidden() {
                 window.activate_window();
             }
             (

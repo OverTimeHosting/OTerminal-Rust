@@ -82,7 +82,7 @@ impl Render for PairingCodeModal {
                     .child(
                         h_flex()
                             .gap_1p5()
-                            .child(Icon::new(IconName::Othcloud).size(IconSize::Small))
+                            .child(gpui::img("images/oth_logo.png").flex_none().size(px(18.)))
                             .child(Headline::new("Pair with OTHCloud").size(HeadlineSize::XSmall)),
                     )
                     .child(

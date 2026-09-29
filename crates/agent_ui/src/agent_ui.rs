@@ -5,6 +5,7 @@ mod agent_model_selector;
 mod agent_panel;
 mod agent_registry_ui;
 mod buffer_codegen;
+pub mod claude_tab;
 mod completion_provider;
 mod config_options;
 mod context;
@@ -231,6 +232,12 @@ actions!(
         RemoveSelectedThread,
         /// Renames the currently selected thread.
         RenameSelectedThread,
+        /// Opens a new Claude Code thread as a tab in the center pane.
+        NewClaudeTab,
+        /// Moves the agent panel's current thread into a tab in the center pane.
+        OpenThreadInTab,
+        /// Moves the active Claude Code tab into a new window for the same project.
+        OpenClaudeTabInNewWindow,
         /// Starts a chat conversation with follow-up enabled.
         ChatWithFollow,
         /// Cycles to the next inline assist suggestion.
@@ -474,6 +481,11 @@ impl Agent {
     pub fn icon(&self) -> Option<IconName> {
         match self {
             Self::NativeAgent => None,
+            Self::Custom { id }
+                if id.as_ref() == project::agent_server_store::CLAUDE_CODE_AGENT_ID =>
+            {
+                Some(IconName::AiClaude)
+            }
             Self::Custom { .. } => Some(IconName::Sparkle),
             #[cfg(any(test, feature = "test-support"))]
             Self::Stub => None,
@@ -493,6 +505,24 @@ impl Agent {
             #[cfg(any(test, feature = "test-support"))]
             Self::Stub => Rc::new(crate::test_support::StubAgentServer::default_response()),
         }
+    }
+}
+
+/// OTerminal: the Claude Code agent (Zed's `claude-acp` ACP registry agent).
+pub fn claude_code_agent() -> Agent {
+    Agent::Custom {
+        id: AgentId::new(project::agent_server_store::CLAUDE_CODE_AGENT_ID),
+    }
+}
+
+/// OTerminal: in Claude Code only mode ([`DisableAiSettings::claude_code_only`])
+/// every thread runs Claude Code, so any other agent (the Zed Agent, other
+/// ACP agents, a stale last-used agent) resolves to it.
+pub fn resolve_agent(agent: Agent, cx: &App) -> Agent {
+    if DisableAiSettings::claude_code_only(cx) && agent != claude_code_agent() {
+        claude_code_agent()
+    } else {
+        agent
     }
 }
 
@@ -614,6 +644,7 @@ pub fn init(
         init_language_model_settings(cx);
     }
     agent_panel::init(cx);
+    claude_tab::init(cx);
     context_server_configuration::init(language_registry, fs.clone(), cx);
     thread_metadata_store::init(cx);
     terminal_thread_metadata_store::init(cx);
@@ -816,8 +847,38 @@ fn update_command_palette_filter(cx: &mut App) {
             TypeId::of::<zed_actions::assistant::CreateSkillFromUrl>(),
         ];
 
+        // OTerminal: agent-panel commands that only apply to Zed's own AI
+        // (Zed Agent profiles/rules/skills, provider settings, onboarding,
+        // inline assist, the ACP registry, the threads sidebar).
+        let non_claude_code_actions = [
+            TypeId::of::<zed_actions::agent::OpenSettings>(),
+            TypeId::of::<zed_actions::agent::OpenOnboardingModal>(),
+            TypeId::of::<zed_actions::agent::ResetOnboarding>(),
+            TypeId::of::<zed_actions::assistant::OpenGlobalAgentsMdRules>(),
+            TypeId::of::<zed_actions::assistant::OpenProjectAgentsMdRules>(),
+            TypeId::of::<zed_actions::AcpRegistry>(),
+            TypeId::of::<ManageProfiles>(),
+            TypeId::of::<ToggleProfileSelector>(),
+            TypeId::of::<CycleNextInlineAssist>(),
+            TypeId::of::<CyclePreviousInlineAssist>(),
+            TypeId::of::<ResetTrialUpsell>(),
+            TypeId::of::<ResetTrialEndUpsell>(),
+            TypeId::of::<RerunRulesToSkillsMigration>(),
+            TypeId::of::<ImportThreadsFromOtherChannels>(),
+            TypeId::of::<ArchiveSelectedThread>(),
+            TypeId::of::<RemoveSelectedThread>(),
+            TypeId::of::<RenameSelectedThread>(),
+        ];
+
         if disable_ai {
-            filter.hide_namespace("agent");
+            // OTerminal: Claude Code only (see `DisableAiSettings::claude_code_only`);
+            // the agent panel's own commands stay available.
+            if agent_enabled {
+                filter.show_namespace("agent");
+            } else {
+                filter.hide_namespace("agent");
+            }
+            filter.hide_action_types(&non_claude_code_actions);
             filter.hide_namespace("agents");
             filter.hide_namespace("assistant");
             filter.hide_namespace("copilot");
@@ -831,7 +892,9 @@ fn update_command_palette_filter(cx: &mut App) {
                 filter.show_namespace("agent");
                 filter.show_namespace("agents");
                 filter.show_namespace("assistant");
+                filter.show_action_types(non_claude_code_actions.iter());
             } else {
+                filter.hide_action_types(&non_claude_code_actions);
                 filter.hide_namespace("agent");
                 filter.hide_namespace("agents");
                 filter.hide_namespace("assistant");
@@ -961,7 +1024,8 @@ mod tests {
     fn test_agent_command_palette_visibility(cx: &mut TestAppContext) {
         // Init settings
         cx.update(|cx| {
-            let store = SettingsStore::test(cx);
+            let mut store = SettingsStore::test(cx);
+            crate::test_support::enable_ai_for_tests(&mut store, cx);
             cx.set_global(store);
             command_palette_hooks::init(cx);
             AgentSettings::register(cx);
@@ -1149,10 +1213,62 @@ mod tests {
                 filter.is_hidden(&zed_actions::assistant::OpenSkillCreator),
                 "OpenSkillCreator should be hidden when AI is disabled"
             );
+            // OTerminal: `disable_ai` keeps the agent panel, running Claude
+            // Code only, so its commands stay while Zed Agent ones go.
+            assert!(
+                !filter.is_hidden(&NewThread),
+                "NewThread should stay visible in Claude Code only mode"
+            );
+            assert!(
+                filter.is_hidden(&zed_actions::agent::OpenSettings),
+                "Agent settings should be hidden in Claude Code only mode"
+            );
+            assert!(
+                filter.is_hidden(&zed_actions::assistant::OpenProjectAgentsMdRules),
+                "Zed Agent rules should be hidden in Claude Code only mode"
+            );
+        });
+
+        // Disabling the agent hides the panel's commands too.
+        cx.update(|cx| {
+            let mut new_settings = agent_settings.clone();
+            new_settings.enabled = false;
+            AgentSettings::override_global(new_settings, cx);
+            update_command_palette_filter(cx);
+        });
+
+        cx.update(|cx| {
+            let filter = CommandPaletteFilter::try_global(cx).unwrap();
             assert!(
                 filter.is_hidden(&NewThread),
-                "NewThread should be hidden when AI is disabled"
+                "NewThread should be hidden when AI and the agent are disabled"
             );
+        });
+    }
+
+    #[gpui::test]
+    fn test_claude_code_only_resolves_every_agent(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            let store = SettingsStore::test(cx);
+            cx.set_global(store);
+            DisableAiSettings::register(cx);
+
+            // OTerminal ships `"disable_ai": true`: Claude Code only.
+            assert!(DisableAiSettings::claude_code_only(cx));
+            assert_eq!(resolve_agent(Agent::NativeAgent, cx), claude_code_agent());
+            assert_eq!(
+                resolve_agent(
+                    Agent::Custom {
+                        id: "gemini".into()
+                    },
+                    cx
+                ),
+                claude_code_agent()
+            );
+            assert_eq!(resolve_agent(claude_code_agent(), cx), claude_code_agent());
+
+            DisableAiSettings::override_global(DisableAiSettings { disable_ai: false }, cx);
+            assert_eq!(resolve_agent(Agent::NativeAgent, cx), Agent::NativeAgent);
         });
     }
 

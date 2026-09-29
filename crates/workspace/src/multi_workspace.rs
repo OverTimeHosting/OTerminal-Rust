@@ -2,9 +2,9 @@ use anyhow::{Context as _, Result};
 use fs::Fs;
 
 use gpui::{
-    AnyView, App, Context, DragMoveEvent, Entity, EntityId, EventEmitter, FocusHandle, Focusable,
-    ManagedView, MouseButton, Pixels, Render, Subscription, Task, TaskExt, WeakEntity, Window,
-    WindowId, actions, deferred, px,
+    AnyView, App, AsyncApp, Context, DragMoveEvent, Entity, EntityId, EventEmitter, FocusHandle,
+    Focusable, ManagedView, MouseButton, Pixels, Render, Subscription, Task, TaskExt, WeakEntity,
+    Window, WindowBounds, WindowHandle, WindowId, actions, deferred, point, px,
 };
 use project::Project;
 pub use project::ProjectGroupKey;
@@ -17,6 +17,7 @@ use std::rc::Rc;
 use ui::prelude::*;
 use util::ResultExt;
 use util::path_list::PathList;
+use uuid::Uuid;
 use zed_actions::agents_sidebar::ToggleThreadSwitcher;
 
 use agent_settings::AgentSettings;
@@ -29,7 +30,10 @@ use crate::open_remote_project_with_existing_connection;
 use crate::{
     CloseIntent, CloseWindow, DockPosition, Event as WorkspaceEvent, Item, ModalView, OpenMode,
     Panel, Workspace, WorkspaceId, client_side_decorations,
-    persistence::model::MultiWorkspaceState,
+    persistence::model::{
+        MultiWorkspaceState, SerializedProjectGroup, SerializedProjectWindow,
+        SerializedProjectWindowBounds,
+    },
 };
 
 actions!(
@@ -320,6 +324,49 @@ pub struct MultiWorkspace {
     _serialize_task: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
     previous_focus_handle: Option<FocusHandle>,
+    /// OTerminal: extra windows owned by this window's project groups. They
+    /// are shown while their group is the displayed one and hidden (never
+    /// closed) otherwise.
+    project_windows: Vec<ProjectWindow>,
+    /// OTerminal: project windows restored from the last session, opened the
+    /// next time their project group is displayed.
+    pending_project_windows: Vec<SerializedProjectWindow>,
+    /// OTerminal: set when this window is itself a project window.
+    project_window_owner: Option<ProjectWindowOwner>,
+    /// OTerminal: when the last project window was opened on request.
+    last_opened_project_window: Option<(std::time::Instant, WindowHandle<MultiWorkspace>)>,
+}
+
+/// Requests to open a project window this close together open one window.
+const PROJECT_WINDOW_OPEN_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(800);
+
+/// Last known placement of a project window: its bounds and display.
+type ProjectWindowPlacement = Rc<Cell<Option<(WindowBounds, Option<Uuid>)>>>;
+
+/// OTerminal: an extra OS window that belongs to one project group of its
+/// owning window. Its workspace shares the group's [`Project`], so buffers,
+/// language servers and worktrees are shared while panes, docks and terminals
+/// are its own.
+struct ProjectWindow {
+    window: WindowHandle<MultiWorkspace>,
+    project: WeakEntity<Project>,
+    workspace: WeakEntity<Workspace>,
+    placement: ProjectWindowPlacement,
+}
+
+/// OTerminal: the window (and workspace) a project window belongs to.
+pub struct ProjectWindowOwner {
+    window: WindowHandle<MultiWorkspace>,
+    /// The workspace the project window was opened with. Showing any other
+    /// workspace in it (e.g. opening another folder there) turns it into a
+    /// regular window.
+    workspace_id: EntityId,
+}
+
+impl ProjectWindowOwner {
+    pub fn window(&self) -> WindowHandle<MultiWorkspace> {
+        self.window
+    }
 }
 
 impl EventEmitter<MultiWorkspaceEvent> for MultiWorkspace {}
@@ -339,12 +386,33 @@ impl MultiWorkspace {
     }
 
     pub fn new(workspace: Entity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let release_subscription = cx.on_release(|this: &mut MultiWorkspace, _cx| {
+        let release_subscription = cx.on_release(|this: &mut MultiWorkspace, cx| {
             if let Some(task) = this._serialize_task.take() {
                 task.detach();
             }
             for task in std::mem::take(&mut this.pending_removal_tasks) {
                 task.detach();
+            }
+            // Project windows normally close with their owner. Should the
+            // owner go away some other way, never leave them hidden and
+            // unreachable: turn them into regular, visible windows.
+            let orphans: Vec<_> = this
+                .project_windows
+                .drain(..)
+                .map(|project_window| project_window.window)
+                .collect();
+            if !orphans.is_empty() {
+                cx.defer(move |cx| {
+                    for orphan in orphans {
+                        orphan
+                            .update(cx, |multi_workspace, window, cx| {
+                                multi_workspace.project_window_owner = None;
+                                window.set_window_hidden(false);
+                                cx.notify();
+                            })
+                            .ok();
+                    }
+                });
             }
         });
         // OTerminal: project tabs keep every workspace of a window alive, so
@@ -372,6 +440,10 @@ impl MultiWorkspace {
             _serialize_task: None,
             _subscriptions: vec![release_subscription],
             previous_focus_handle: None,
+            project_windows: Vec::new(),
+            pending_project_windows: Vec::new(),
+            project_window_owner: None,
+            last_opened_project_window: None,
         }
     }
 
@@ -560,7 +632,28 @@ impl MultiWorkspace {
             log::error!("cannot close a window whose root is not a MultiWorkspace");
             return;
         };
+        // OTerminal: a window takes its project windows (shown or hidden) with
+        // it, so the app never lingers with only hidden windows left.
+        let project_windows = self.live_project_windows(cx);
+        log::info!(
+            "closing window {:?}{}",
+            self.window_id,
+            match (self.project_window_owner.is_some(), project_windows.len()) {
+                (true, _) => " (a project window)".to_string(),
+                (false, 0) => String::new(),
+                (false, count) => format!(" and its {count} project windows"),
+            }
+        );
         cx.spawn(async move |_, cx| {
+            for project_window in &project_windows {
+                if !crate::prepare_window_to_close(*project_window, CloseIntent::CloseWindow, cx)
+                    .await
+                    .context("preparing a project window to close")?
+                {
+                    return anyhow::Ok(());
+                }
+            }
+
             if !crate::prepare_window_to_close(window_handle, CloseIntent::CloseWindow, cx)
                 .await
                 .context("preparing the window to close")?
@@ -569,6 +662,12 @@ impl MultiWorkspace {
             }
 
             crate::flush_windows_serialization(&[window_handle], cx).await;
+
+            for project_window in project_windows {
+                project_window
+                    .update(cx, |_, window, _cx| window.remove_window())
+                    .log_err();
+            }
 
             window_handle
                 .update(cx, |_, window, _cx| {
@@ -1047,7 +1146,35 @@ impl MultiWorkspace {
             .collect()
     }
 
+    /// Closes the project group's workspaces (prompting to save) and removes
+    /// the group. Its project windows are closed first; cancelling any of
+    /// their prompts keeps the whole group open.
     pub fn remove_project_group(
+        &mut self,
+        group_key: &ProjectGroupKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<bool>> {
+        self.pending_project_windows
+            .retain(|pending| ProjectGroupKey::from(pending.project_group.clone()) != *group_key);
+        let project_windows = self.project_windows_for_group(group_key, cx);
+        if project_windows.is_empty() {
+            return self.remove_project_group_workspaces(group_key, window, cx);
+        }
+
+        let group_key = group_key.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            if !close_project_windows(project_windows, cx).await? {
+                return Ok(false);
+            }
+            this.update_in(cx, |this, window, cx| {
+                this.remove_project_group_workspaces(&group_key, window, cx)
+            })?
+            .await
+        })
+    }
+
+    fn remove_project_group_workspaces(
         &mut self,
         group_key: &ProjectGroupKey,
         window: &mut Window,
@@ -1465,6 +1592,7 @@ impl MultiWorkspace {
         });
 
         cx.emit(MultiWorkspaceEvent::ActiveWorkspaceChanged { source_workspace });
+        self.handle_displayed_workspace_change(window, cx);
         self.serialize(cx);
         self.focus_active_workspace(window, cx);
         cx.notify();
@@ -1525,6 +1653,10 @@ impl MultiWorkspace {
     }
 
     pub fn serialize(&mut self, cx: &mut Context<Self>) {
+        // A project window is persisted by its owner.
+        if self.project_window_owner.is_some() {
+            return;
+        }
         self._serialize_task = Some(cx.spawn(async move |this, cx| {
             let Ok(task) = this.update(cx, |this, cx| this.serialize_now(cx)) else {
                 return;
@@ -1548,10 +1680,15 @@ impl MultiWorkspace {
                 .collect::<Vec<_>>(),
             sidebar_open: self.sidebar_open,
             sidebar_state: self.sidebar.as_ref().and_then(|s| s.serialized_state(cx)),
+            project_windows: self.serialized_project_windows(cx),
         };
         let window_id = self.window_id;
         let kvp = db::kvp::KeyValueStore::global(cx);
+        let is_project_window = self.project_window_owner.is_some();
         async move {
+            if is_project_window {
+                return;
+            }
             crate::persistence::write_multi_workspace_state(&kvp, window_id, state).await;
         }
     }
@@ -2075,6 +2212,461 @@ impl MultiWorkspace {
             })
         }
     }
+}
+
+/// OTerminal: project windows — extra OS windows that belong to one project
+/// group (tab) of their owning window.
+///
+/// A project window shows a second [`Workspace`] built on the group's
+/// [`Project`], so both windows see the same folders and the same buffers
+/// (edits appear in both), while each has its own panes, docks and
+/// terminals. While another group is displayed in the owning window the
+/// project window is hidden — not closed — so everything in it, including
+/// running terminals, is intact when the group is displayed again.
+impl MultiWorkspace {
+    /// The window this window belongs to, when it is a project window.
+    pub fn project_window_owner(&self) -> Option<&ProjectWindowOwner> {
+        self.project_window_owner.as_ref()
+    }
+
+    pub fn is_project_window(&self) -> bool {
+        self.project_window_owner.is_some()
+    }
+
+    /// The open project windows of the group `key`, oldest first.
+    pub fn project_windows_for_group(
+        &self,
+        key: &ProjectGroupKey,
+        cx: &App,
+    ) -> Vec<WindowHandle<MultiWorkspace>> {
+        let open_windows = cx.windows();
+        self.project_windows
+            .iter()
+            .filter(|project_window| {
+                open_windows
+                    .iter()
+                    .any(|window| window.window_id() == project_window.window.window_id())
+            })
+            .filter(|project_window| {
+                project_window
+                    .project
+                    .upgrade()
+                    .is_some_and(|project| project.read(cx).project_group_key(cx) == *key)
+            })
+            .map(|project_window| project_window.window)
+            .collect()
+    }
+
+    fn live_project_windows(&self, cx: &App) -> Vec<WindowHandle<MultiWorkspace>> {
+        let open_windows = cx.windows();
+        self.project_windows
+            .iter()
+            .map(|project_window| project_window.window)
+            .filter(|handle| {
+                open_windows
+                    .iter()
+                    .any(|window| window.window_id() == handle.window_id())
+            })
+            .collect()
+    }
+
+    /// Opens another window for the project displayed in this window. From a
+    /// project window, the new window is added to the same owner.
+    pub fn open_project_window(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<WindowHandle<MultiWorkspace>> {
+        // Cascade from the window the request came from.
+        let bounds = match window.window_bounds() {
+            WindowBounds::Windowed(bounds) => {
+                let mut bounds = bounds;
+                bounds.origin = bounds.origin + point(px(32.), px(32.));
+                WindowBounds::Windowed(bounds)
+            }
+            maximized_or_fullscreen => maximized_or_fullscreen,
+        };
+        let display = window
+            .display(cx)
+            .and_then(|display| display.uuid().log_err());
+
+        if let Some(owner) = &self.project_window_owner {
+            return owner.window.update(cx, |owner, _window, cx| {
+                owner.open_project_window_for_displayed_group(Some(bounds), display, cx)
+            })?;
+        }
+        self.open_project_window_for_displayed_group(Some(bounds), display, cx)
+    }
+
+    fn open_project_window_for_displayed_group(
+        &mut self,
+        bounds: Option<WindowBounds>,
+        display: Option<Uuid>,
+        cx: &mut Context<Self>,
+    ) -> Result<WindowHandle<MultiWorkspace>> {
+        // Opening a window moves the focus to it, and on Windows activation
+        // injects an Alt press: a shortcut that is still held (or repeating)
+        // would then reach the new window and open another one. Requests that
+        // close together are one request.
+        let now = cx.background_executor().now();
+        if let Some((opened_at, window)) = self.last_opened_project_window
+            && now.saturating_duration_since(opened_at) < PROJECT_WINDOW_OPEN_DEBOUNCE
+            && self
+                .project_windows
+                .iter()
+                .any(|project_window| project_window.window == window)
+        {
+            return Ok(window);
+        }
+
+        let workspace = self.workspace().clone();
+        let key = workspace.read(cx).project_group_key(cx);
+        anyhow::ensure!(
+            !key.path_list().paths().is_empty(),
+            "open a folder before opening another window for it"
+        );
+        // The project must be a tab for its windows to follow it.
+        self.retain_active_workspace(cx);
+        let project = workspace.read(cx).project().clone();
+        let handle = self.spawn_project_window(project, bounds, display, Vec::new(), cx)?;
+        self.last_opened_project_window = Some((now, handle));
+        self.serialize(cx);
+        cx.notify();
+        Ok(handle)
+    }
+
+    fn spawn_project_window(
+        &mut self,
+        project: Entity<Project>,
+        bounds: Option<WindowBounds>,
+        display: Option<Uuid>,
+        open_paths: Vec<PathBuf>,
+        cx: &mut Context<Self>,
+    ) -> Result<WindowHandle<MultiWorkspace>> {
+        let app_state = self.workspace().read(cx).app_state().clone();
+        let mut options = (app_state.build_window_options)(display, cx);
+        if bounds.is_some() {
+            options.window_bounds = bounds;
+        }
+        let owner_window = WindowHandle::<MultiWorkspace>::new(self.window_id);
+        let placement = ProjectWindowPlacement::default();
+
+        let handle = cx.open_window(options, {
+            let project = project.clone();
+            let placement = placement.clone();
+            move |window, cx| {
+                // No database id: the workspace database keeps one row per
+                // set of paths, which belongs to the project's tab.
+                let workspace = cx.new(|cx| Workspace::new(None, project, app_state, window, cx));
+                let workspace_id = workspace.entity_id();
+                cx.new(|cx| {
+                    let mut multi_workspace = MultiWorkspace::new(workspace, window, cx);
+                    multi_workspace.project_window_owner = Some(ProjectWindowOwner {
+                        window: owner_window,
+                        workspace_id,
+                    });
+                    placement.set(Some(current_placement(window, cx)));
+                    multi_workspace
+                        ._subscriptions
+                        .push(cx.observe_window_bounds(window, move |_, window, cx| {
+                            placement.set(Some(current_placement(window, cx)));
+                        }));
+                    multi_workspace
+                        ._subscriptions
+                        .push(cx.on_release(move |_, cx| {
+                            cx.defer(move |cx| {
+                                owner_window
+                                    .update(cx, |owner, _window, cx| {
+                                        owner.schedule_project_window_sync(cx);
+                                        owner.serialize(cx);
+                                    })
+                                    .ok();
+                            });
+                        }));
+                    multi_workspace
+                })
+            }
+        })?;
+
+        let workspace = handle.update(cx, |multi_workspace, window, cx| {
+            // Workspace windows are created invisible (`show: false`) and
+            // revealed — with their saved placement applied — by activating
+            // them, like `Workspace::new_local` does.
+            window.activate_window();
+            let workspace = multi_workspace.workspace().clone();
+            if !open_paths.is_empty() {
+                workspace.update(cx, |workspace, cx| {
+                    workspace
+                        .open_paths(
+                            open_paths,
+                            crate::OpenOptions {
+                                visible: Some(crate::OpenVisible::None),
+                                ..Default::default()
+                            },
+                            None,
+                            window,
+                            cx,
+                        )
+                        .detach();
+                });
+            }
+            workspace.downgrade()
+        })?;
+
+        self.project_windows.push(ProjectWindow {
+            window: handle,
+            project: project.downgrade(),
+            workspace,
+            placement,
+        });
+        log::info!(
+            "opened project window {:?} for window {:?} ({} project windows)",
+            handle.window_id(),
+            self.window_id,
+            self.project_windows.len()
+        );
+        self.schedule_project_window_sync(cx);
+        Ok(handle)
+    }
+
+    /// Remembers project windows from the last session; each is reopened the
+    /// next time its project group is displayed in this window.
+    pub fn restore_project_windows(
+        &mut self,
+        project_windows: Vec<SerializedProjectWindow>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.project_window_owner.is_some() {
+            return;
+        }
+        let persisted = project_windows.len();
+        let valid = valid_restored_project_windows(project_windows);
+        log::info!(
+            "restoring {} of {persisted} persisted project windows for window {:?}",
+            valid.len(),
+            self.window_id
+        );
+        self.pending_project_windows.extend(valid);
+        self.schedule_project_window_sync(cx);
+    }
+
+    fn handle_displayed_workspace_change(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(owner) = &self.project_window_owner
+            && owner.workspace_id != self.workspace().entity_id()
+        {
+            // Another project was opened here: this is a regular window now.
+            let owner_window = owner.window;
+            self.project_window_owner = None;
+            window.set_window_hidden(false);
+            cx.defer(move |cx| {
+                owner_window
+                    .update(cx, |owner, _window, cx| {
+                        owner.schedule_project_window_sync(cx);
+                        owner.serialize(cx);
+                    })
+                    .ok();
+            });
+        }
+        self.schedule_project_window_sync(cx);
+    }
+
+    /// Shows the project windows of the displayed group and hides the others,
+    /// once the current update is done (so no window is borrowed).
+    fn schedule_project_window_sync(&mut self, cx: &mut Context<Self>) {
+        if self.project_windows.is_empty() && self.pending_project_windows.is_empty() {
+            return;
+        }
+        let this = cx.weak_entity();
+        cx.defer(move |cx| {
+            this.update(cx, |this, cx| this.sync_project_windows(cx))
+                .ok();
+        });
+    }
+
+    fn sync_project_windows(&mut self, cx: &mut Context<Self>) {
+        let owner_id = self.window_id;
+        self.project_windows.retain(|project_window| {
+            project_window.project.upgrade().is_some()
+                && project_window.window.read(cx).is_ok_and(|multi_workspace| {
+                    multi_workspace
+                        .project_window_owner
+                        .as_ref()
+                        .is_some_and(|owner| owner.window.window_id() == owner_id)
+                })
+        });
+
+        let displayed_key = self.workspace().read(cx).project_group_key(cx);
+        if !displayed_key.path_list().paths().is_empty()
+            && self.pending_project_windows.iter().any(|pending| {
+                ProjectGroupKey::from(pending.project_group.clone()) == displayed_key
+            })
+        {
+            let project = self.workspace().read(cx).project().clone();
+            let (ready, pending): (Vec<_>, Vec<_>) =
+                std::mem::take(&mut self.pending_project_windows)
+                    .into_iter()
+                    .partition(|pending| {
+                        ProjectGroupKey::from(pending.project_group.clone()) == displayed_key
+                    });
+            self.pending_project_windows = pending;
+            for restored in ready {
+                self.spawn_project_window(
+                    project.clone(),
+                    restored
+                        .bounds
+                        .map(SerializedProjectWindowBounds::to_window_bounds),
+                    restored.display,
+                    restored.open_paths,
+                    cx,
+                )
+                .log_err();
+            }
+            // Restored windows reappear behind this one: the user is looking
+            // at this window, which keeps the focus.
+            let owner_window = WindowHandle::<MultiWorkspace>::new(self.window_id);
+            cx.defer(move |cx| {
+                owner_window
+                    .update(cx, |_, window, _cx| window.activate_window())
+                    .log_err();
+            });
+        }
+
+        for project_window in &self.project_windows {
+            let hidden = project_window
+                .project
+                .upgrade()
+                .is_none_or(|project| project.read(cx).project_group_key(cx) != displayed_key);
+            let window_id = project_window.window.window_id();
+            project_window
+                .window
+                .update(cx, |_, window, _cx| {
+                    if window.is_window_hidden() != hidden {
+                        log::debug!("project window {window_id:?} hidden: {hidden}");
+                    }
+                    window.set_window_hidden(hidden)
+                })
+                .log_err();
+        }
+    }
+
+    pub(crate) fn serialized_project_windows(&self, cx: &App) -> Vec<SerializedProjectWindow> {
+        let mut serialized = Vec::new();
+        for project_window in &self.project_windows {
+            let Some(project) = project_window.project.upgrade() else {
+                continue;
+            };
+            let key = project.read(cx).project_group_key(cx);
+            // Remote projects need a connection before a window can be
+            // restored for them.
+            if key.path_list().paths().is_empty() || key.host().is_some() {
+                continue;
+            }
+            let (bounds, display) = match project_window.placement.get() {
+                Some((bounds, display)) => (
+                    Some(SerializedProjectWindowBounds::from_window_bounds(bounds)),
+                    display,
+                ),
+                None => (None, None),
+            };
+            let mut open_paths: Vec<PathBuf> = Vec::new();
+            if let Some(workspace) = project_window.workspace.upgrade() {
+                for item in workspace.read(cx).items(cx) {
+                    if let Some(path) = item
+                        .project_path(cx)
+                        .and_then(|project_path| project.read(cx).absolute_path(&project_path, cx))
+                        && !open_paths.contains(&path)
+                    {
+                        open_paths.push(path);
+                    }
+                }
+            }
+            serialized.push(SerializedProjectWindow {
+                version: SerializedProjectWindow::CURRENT_VERSION,
+                project_group: SerializedProjectGroup::from_group(&key, true),
+                bounds,
+                display,
+                open_paths,
+            });
+        }
+        serialized.extend(self.pending_project_windows.iter().cloned());
+        serialized
+    }
+}
+
+/// The most project windows restored for one project group; anything beyond
+/// is stale state, not something a user keeps open.
+pub(crate) const MAX_RESTORED_PROJECT_WINDOWS_PER_GROUP: usize = 8;
+
+/// Drops persisted project windows that must not be reopened: entries from
+/// before [`SerializedProjectWindow::CURRENT_VERSION`] (an early build left
+/// project windows invisible, so users kept opening windows they never saw),
+/// entries without paths or for remote projects, and any excess over
+/// [`MAX_RESTORED_PROJECT_WINDOWS_PER_GROUP`] per project group.
+pub(crate) fn valid_restored_project_windows(
+    project_windows: Vec<SerializedProjectWindow>,
+) -> Vec<SerializedProjectWindow> {
+    let mut per_group: Vec<(ProjectGroupKey, usize)> = Vec::new();
+    project_windows
+        .into_iter()
+        .filter(|window| window.version >= SerializedProjectWindow::CURRENT_VERSION)
+        .filter(|window| {
+            let key = ProjectGroupKey::from(window.project_group.clone());
+            if key.path_list().paths().is_empty() || key.host().is_some() {
+                return false;
+            }
+            match per_group.iter_mut().find(|(group, _)| *group == key) {
+                Some((_, count)) => {
+                    *count += 1;
+                    *count <= MAX_RESTORED_PROJECT_WINDOWS_PER_GROUP
+                }
+                None => {
+                    per_group.push((key, 1));
+                    true
+                }
+            }
+        })
+        .collect()
+}
+
+fn current_placement(window: &Window, cx: &App) -> (WindowBounds, Option<Uuid>) {
+    (
+        window.window_bounds(),
+        window
+            .display(cx)
+            .and_then(|display| display.uuid().log_err()),
+    )
+}
+
+/// Closes project windows, running the usual save prompts. Returns `false`
+/// when the user cancelled, in which case no window is closed.
+async fn close_project_windows(
+    windows: Vec<WindowHandle<MultiWorkspace>>,
+    cx: &mut AsyncApp,
+) -> Result<bool> {
+    log::info!(
+        "closing {} project windows with their project tab",
+        windows.len()
+    );
+    for (index, window) in windows.iter().enumerate() {
+        if !crate::prepare_window_to_close(*window, CloseIntent::CloseWindow, cx).await? {
+            for prepared in &windows[..index] {
+                prepared
+                    .update(cx, |multi_workspace, _window, cx| {
+                        for workspace in multi_workspace.workspaces() {
+                            workspace.update(cx, |workspace, _| workspace.removing = false);
+                        }
+                    })
+                    .ok();
+            }
+            return Ok(false);
+        }
+    }
+    for window in windows {
+        window
+            .update(cx, |_, window, _cx| window.remove_window())
+            .log_err();
+    }
+    Ok(true)
 }
 
 impl Render for MultiWorkspace {
