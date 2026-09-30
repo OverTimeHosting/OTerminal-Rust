@@ -1,0 +1,506 @@
+# OTerminal 2.x (Rust / Zed-based) release pipeline.
+#
+# On every push to the `main` branch:
+#   1. prepare   bump the patch version in OTERMINAL_VERSION, commit
+#                "chore(release): vX [skip ci]", tag vX and push both
+#   2. windows   build oterminal.exe + the Inno Setup installer (x86_64)
+#   3. release   publish a GitHub release (marked latest) with the installer
+#                and SHA256SUMS.txt, notes generated from the commits since
+#                the previous tag
+#
+# Installed copies of OTerminal 2.x pick the release up through their
+# built-in updater (crates/auto_update/src/github_release.rs), which reads
+# this repository's releases (OverTimeHosting/OTerminal-Rust). The VS
+# Code-based OTerminal 1.x lives in OverTimeHosting/Oterminal with its own
+# releases, so the two lines never see each other's updates.
+#
+# See RELEASING.md for the full picture, the self-hosted runner setup and the
+# repository variables that tune this workflow.
+
+name: OTerminal release
+
+on:
+  push:
+    branches: [main]
+    # Documentation-only commits do not need a two-hour build.
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Bump the version, tag and publish a GitHub release (off: build only, the installer is attached to the run). Releases are only cut from the main branch."
+        type: boolean
+        default: true
+      bump:
+        description: "Which part of the version to bump"
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      runner:
+        description: "Where to build (auto: the OTERMINAL_WINDOWS_RUNNER repository variable, else GitHub-hosted)"
+        type: choice
+        options: [auto, github-hosted, self-hosted]
+        default: auto
+
+permissions:
+  contents: read
+
+# One release at a time. A push that arrives while a build is running waits
+# (only the newest waiting run is kept), so a burst of pushes becomes a single
+# release instead of several parallel two-hour builds.
+concurrency:
+  group: oterminal-rust-release
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  prepare:
+    name: Bump version and tag
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (!contains(github.event.head_commit.message, '[skip ci]') &&
+       !contains(github.event.head_commit.message, 'chore(release):'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      sha: ${{ steps.version.outputs.sha }}
+      release: ${{ steps.mode.outputs.release }}
+      runner: ${{ steps.runner.outputs.runner }}
+      self_hosted: ${{ steps.runner.outputs.self_hosted }}
+    steps:
+      - name: Decide release mode
+        id: mode
+        env:
+          EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
+          INPUT_RELEASE: ${{ inputs.release }}
+        run: |
+          release=false
+          if [ "$EVENT" = "push" ]; then
+            release=true
+          elif [ "$INPUT_RELEASE" = "true" ]; then
+            if [ "$REF" != "refs/heads/main" ]; then
+              echo "::error::Releases are only cut from the main branch (got $REF). Re-run with 'release' unchecked to only build."
+              exit 1
+            fi
+            release=true
+          fi
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "Release mode: $release"
+
+      - name: Pick the Windows runner
+        id: runner
+        env:
+          INPUT_RUNNER: ${{ inputs.runner }}
+          VAR_RUNNER: ${{ vars.OTERMINAL_WINDOWS_RUNNER }}
+          VAR_HOSTED_IMAGE: ${{ vars.OTERMINAL_HOSTED_WINDOWS_IMAGE }}
+          VAR_SELF_HOSTED_LABELS: ${{ vars.OTERMINAL_SELF_HOSTED_LABELS }}
+        run: |
+          choice="${INPUT_RUNNER:-auto}"
+          if [ "$choice" = "auto" ]; then
+            choice="${VAR_RUNNER:-github-hosted}"
+          fi
+          if [ "$choice" = "self-hosted" ]; then
+            # Comma-separated labels; the default matches RELEASING.md.
+            labels="${VAR_SELF_HOSTED_LABELS:-self-hosted,Windows,X64,oterminal}"
+            runner=$(printf '%s' "$labels" | jq -R -c 'split(",") | map(gsub("^\\s+|\\s+$"; ""))')
+            echo "self_hosted=true" >> "$GITHUB_OUTPUT"
+          else
+            image="${VAR_HOSTED_IMAGE:-windows-2022}"
+            runner=$(jq -n -c --arg image "$image" '$image')
+            echo "self_hosted=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "runner=$runner" >> "$GITHUB_OUTPUT"
+          echo "Windows runner: $runner"
+
+      - uses: actions/checkout@v4
+        with:
+          # The branch head (not the pushed sha) so the bump lands on top of
+          # anything pushed while this run was queued.
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump OTERMINAL_VERSION, commit and tag
+        id: version
+        env:
+          RELEASE: ${{ steps.mode.outputs.release }}
+          BUMP: ${{ inputs.bump || 'patch' }}
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          current=$(tr -d ' \r\n' < OTERMINAL_VERSION)
+          if ! [[ "$current" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+            echo "::error::OTERMINAL_VERSION must be MAJOR.MINOR.PATCH, got '$current'"
+            exit 1
+          fi
+          major=${BASH_REMATCH[1]} minor=${BASH_REMATCH[2]} patch=${BASH_REMATCH[3]}
+
+          if [ "$RELEASE" != "true" ]; then
+            echo "Build only: keeping version $current"
+            {
+              echo "version=$current"
+              echo "tag="
+              echo "sha=$(git rev-parse HEAD)"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          case "$BUMP" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            *)     patch=$((patch + 1)) ;;
+          esac
+          # Skip versions whose tag already exists (e.g. left by a failed run).
+          git fetch --tags --force --quiet origin
+          while git rev-parse -q --verify "refs/tags/v$major.$minor.$patch" >/dev/null; do
+            echo "Tag v$major.$minor.$patch exists, skipping it"
+            patch=$((patch + 1))
+          done
+          version="$major.$minor.$patch"
+          tag="v$version"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          printf '%s\n' "$version" > OTERMINAL_VERSION
+          git add OTERMINAL_VERSION
+          git commit -m "chore(release): $tag [skip ci]"
+          git tag -a "$tag" -m "OTerminal $version"
+
+          for attempt in 1 2 3; do
+            if git push origin "HEAD:refs/heads/$BRANCH"; then
+              break
+            fi
+            if [ "$attempt" = 3 ]; then
+              echo "::error::Could not push the version bump to $BRANCH"
+              exit 1
+            fi
+            echo "Push rejected, rebasing onto the new $BRANCH head"
+            git tag -d "$tag"
+            git pull --rebase origin "$BRANCH"
+            git tag -a "$tag" -m "OTerminal $version"
+          done
+          git push origin "refs/tags/$tag"
+
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "sha=$(git rev-parse HEAD)"
+          } >> "$GITHUB_OUTPUT"
+          echo "Tagged $tag at $(git rev-parse HEAD)"
+
+  windows:
+    name: Build Windows x86_64
+    needs: prepare
+    runs-on: ${{ fromJSON(needs.prepare.outputs.runner) }}
+    # GitHub-hosted jobs are killed at 6 h. A cold hosted build takes about
+    # 2-3 h (see RELEASING.md), warm ones well under that.
+    timeout-minutes: 350
+    permissions:
+      contents: read
+    env:
+      ZED_RELEASE_CHANNEL: stable
+      RELEASE_CHANNEL: stable
+      ZED_COMMIT_SHA: ${{ needs.prepare.outputs.sha }}
+      SELF_HOSTED: ${{ needs.prepare.outputs.self_hosted }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Enable long paths for git
+        run: git config --global core.longpaths true
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          # Self-hosted runners keep their workspace; make sure no stale
+          # build outputs (inno\, target\OTerminal-*.exe) leak into this run.
+          clean: true
+
+      - name: Choose the cargo target directory
+        env:
+          SELF_HOSTED_TARGET_DIR: ${{ vars.OTERMINAL_SELF_HOSTED_TARGET_DIR }}
+        run: |
+          Get-PSDrive -PSProvider FileSystem |
+            Where-Object { $_.Used -ne $null } |
+            Format-Table Name, @{ n = 'FreeGB'; e = { [math]::Round($_.Free / 1GB, 1) } }, @{ n = 'UsedGB'; e = { [math]::Round($_.Used / 1GB, 1) } }
+          if ($env:SELF_HOSTED -eq 'true' -and $env:SELF_HOSTED_TARGET_DIR) {
+            # A persistent target dir makes self-hosted builds incremental.
+            $dir = $env:SELF_HOSTED_TARGET_DIR
+          } else {
+            # GitHub-hosted: use whichever drive has the most room (the build
+            # needs roughly 25-40 GB).
+            $drive = Get-PSDrive -PSProvider FileSystem |
+              Where-Object { $_.Free -gt 0 -and $_.Root -match '^[A-Z]:\\$' } |
+              Sort-Object Free -Descending |
+              Select-Object -First 1
+            $dir = Join-Path $drive.Root 'oterm-target'
+          }
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          "CARGO_TARGET_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Output "CARGO_TARGET_DIR=$dir"
+
+      - name: Free disk space (GitHub-hosted)
+        if: needs.prepare.outputs.self_hosted != 'true'
+        run: |
+          $targetDrive = (Split-Path -Qualifier $env:CARGO_TARGET_DIR)
+          $free = (Get-PSDrive ($targetDrive.TrimEnd(':'))).Free / 1GB
+          Write-Output ("{0} has {1:N1} GB free" -f $targetDrive, $free)
+          if ($free -lt 60 -and $targetDrive -eq 'C:') {
+            # Large preinstalled SDKs this build never uses.
+            $paths = @(
+              'C:\Android',
+              'C:\Program Files (x86)\Android',
+              'C:\ghcup',
+              'C:\Program Files\dotnet',
+              'C:\Program Files (x86)\Microsoft SDKs\Azure',
+              'C:\Julia',
+              'C:\Strawberry',
+              'C:\selenium',
+              'C:\Miniconda'
+            )
+            foreach ($path in $paths) {
+              if (Test-Path $path) {
+                Write-Output "Removing $path"
+                Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $path
+              }
+            }
+            $free = (Get-PSDrive C).Free / 1GB
+            Write-Output ("C: now has {0:N1} GB free" -f $free)
+          }
+
+      - name: Install the Rust toolchain (rust-toolchain.toml)
+        run: |
+          rustup show active-toolchain 2>$null
+          if ($LASTEXITCODE -ne 0) { rustup toolchain install }
+          rustup target add x86_64-pc-windows-msvc
+          rustc --version
+          cargo --version
+
+      - name: Set up sccache (GitHub Actions cache backend)
+        if: needs.prepare.outputs.self_hosted != 'true' && vars.OTERMINAL_USE_SCCACHE != 'false'
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Enable sccache
+        if: needs.prepare.outputs.self_hosted != 'true' && vars.OTERMINAL_USE_SCCACHE != 'false'
+        run: |
+          "SCCACHE_GHA_ENABLED=true" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "RUSTC_WRAPPER=sccache" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Lighter release profile (GitHub-hosted)
+        # 4 vCPUs cannot do thin LTO with codegen-units=1 over ~1500 crates
+        # in 6 hours. Self-hosted builds keep the full profile from Cargo.toml
+        # unless OTERMINAL_FAST_RELEASE_PROFILE is set to 'true'.
+        if: >-
+          (needs.prepare.outputs.self_hosted != 'true' && vars.OTERMINAL_FAST_RELEASE_PROFILE != 'false') ||
+          (needs.prepare.outputs.self_hosted == 'true' && vars.OTERMINAL_FAST_RELEASE_PROFILE == 'true')
+        run: |
+          @(
+            'CARGO_PROFILE_RELEASE_LTO=off',
+            'CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16',
+            'CARGO_PROFILE_RELEASE_DEBUG=0'
+          ) | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install cargo-about
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about@0.8.2
+
+      - name: Ensure Inno Setup is installed
+        run: |
+          $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          if (-not (Test-Path $iscc) -and -not (Get-Command iscc.exe -ErrorAction SilentlyContinue)) {
+            Write-Output 'Installing Inno Setup via Chocolatey'
+            choco install innosetup -y --no-progress
+          }
+
+      - name: Build oterminal.exe and the installer
+        run: |
+          $started = Get-Date
+          ./script/bundle-windows.ps1 -Architecture x86_64
+          if ($LASTEXITCODE -ne 0) { throw "bundle-windows.ps1 failed with $LASTEXITCODE" }
+          Write-Output ("Build took {0:N0} minutes" -f ((Get-Date) - $started).TotalMinutes)
+
+      - name: sccache statistics
+        if: always() && needs.prepare.outputs.self_hosted != 'true' && vars.OTERMINAL_USE_SCCACHE != 'false'
+        continue-on-error: true
+        run: sccache --show-stats
+
+      - name: Stage release assets
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          # Keep in sync with Platform::asset_suffix in crates/auto_update/src/github_release.rs.
+          $name = "OTerminal-$env:VERSION-windows-x86_64-setup.exe"
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item -Force target/OTerminal-x86_64.exe "dist/$name"
+          $hash = (Get-FileHash -Algorithm SHA256 "dist/$name").Hash.ToLowerInvariant()
+          # sha256sum format, LF line endings.
+          [IO.File]::WriteAllText((Join-Path $PWD 'dist/SHA256SUMS.txt'), "$hash  $name`n")
+          Get-ChildItem dist | Format-Table Name, Length
+          Get-Content dist/SHA256SUMS.txt
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: oterminal-windows-x86_64
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload debug symbols
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: oterminal-windows-x86_64-debug-symbols
+          path: ${{ env.CARGO_TARGET_DIR }}/x86_64-pc-windows-msvc/release/*.dbg.zip
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # TODO(oterminal): macOS and Linux builds. The updater already knows their
+  # asset names (OTerminal-<version>-macos-<arch>.dmg,
+  # OTerminal-<version>-linux-<arch>.tar.gz) but self-install is disabled for
+  # them until script/bundle-mac and script/bundle-linux are rebranded and
+  # tested; enable these jobs and add them to `release.needs` then.
+  macos:
+    name: Build macOS (disabled)
+    needs: prepare
+    if: false
+    runs-on: macos-latest
+    steps:
+      - run: echo "TODO"
+
+  linux:
+    name: Build Linux (disabled)
+    needs: prepare
+    if: false
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "TODO"
+
+  release:
+    name: Publish GitHub pre-release
+    needs: [prepare, windows]
+    if: needs.prepare.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Download installer
+        uses: actions/download-artifact@v4
+        with:
+          name: oterminal-windows-x86_64
+          path: dist
+
+      - name: Verify checksums
+        working-directory: dist
+        run: |
+          ls -la
+          sha256sum -c SHA256SUMS.txt
+
+      - name: Write release notes
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+          SHA: ${{ needs.prepare.outputs.sha }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          git fetch --tags --force --quiet origin
+          # Previous Rust-line tag (v2.0.0 and later); v1.x tags belong to the
+          # VS Code-based OTerminal.
+          previous=$(git tag --list 'v*' --sort=-v:refname \
+            | grep -E '^v([2-9]|[1-9][0-9]+)\.[0-9]+\.[0-9]+$' \
+            | grep -vx "$TAG" | head -n 1 || true)
+          if [ -n "$previous" ]; then
+            range="$previous..$TAG"
+            since="since $previous"
+          else
+            range="$TAG"
+            since="(first OTerminal 2.x release; latest 50 commits)"
+          fi
+          installer=$(ls dist/*-setup.exe | xargs -n1 basename)
+          sha=$(awk '{print $1}' dist/SHA256SUMS.txt)
+          {
+            echo "OTerminal $VERSION, built from ${SHA:0:12}."
+            echo
+            echo "> Pre-release of the Rust-based OTerminal 2.x line. Installed copies update"
+            echo "> themselves (Settings: \`auto_update\`, \`auto_update_include_prereleases\`)."
+            echo "> The VS Code-based OTerminal (1.110.x) does not pick up these releases."
+            echo
+            echo "## Download"
+            echo
+            echo "- **Windows x64 installer:** \`$installer\`"
+            echo "  - SHA-256: \`$sha\`"
+            echo
+            echo "## Changes $since"
+            echo
+            git log --no-merges --pretty='- %s (%h)' -n 50 "$range" \
+              | grep -v 'chore(release):' || echo "- No code changes."
+            if [ -n "$previous" ]; then
+              echo
+              echo "**Full diff:** https://github.com/$REPOSITORY/compare/$previous...$TAG"
+            fi
+          } > notes.md
+          cat notes.md
+
+      - name: Create the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --latest \
+            --title "OTerminal $VERSION" \
+            --notes-file notes.md \
+            dist/*
+
+  # A failed build must not leave a tag behind: the next release computes its
+  # notes from the previous tag, and the version bump commit stays (the next
+  # run simply bumps past it).
+  cleanup:
+    name: Remove the tag of a failed release
+    needs: [prepare, windows, release]
+    if: >-
+      always() &&
+      needs.prepare.result == 'success' &&
+      needs.prepare.outputs.release == 'true' &&
+      needs.prepare.outputs.tag != '' &&
+      needs.release.result != 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: Delete the tag (unless a release already uses it)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG exists; keeping the tag."
+          else
+            git push origin --delete "refs/tags/$TAG" || true
+          fi
