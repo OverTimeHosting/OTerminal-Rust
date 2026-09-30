@@ -447,16 +447,24 @@ impl OthcloudApi {
             ),
             None => "/api/desktop/github-token".to_string(),
         };
-        self.request(Method::GET, &path, None).await
+        let mut response: GithubTokenResponse = self.request(Method::GET, &path, None).await?;
+        clean_optional_name(&mut response.label);
+        clean_optional_name(&mut response.app_name);
+        Ok(response)
     }
 
     /// Returns `None` when this OTHCloud deployment predates multi-account support.
     pub async fn github_accounts(&self) -> Result<Option<GithubAccountsResponse>, ApiError> {
         match self
-            .request(Method::GET, "/api/desktop/github-accounts", None)
+            .request::<GithubAccountsResponse>(Method::GET, "/api/desktop/github-accounts", None)
             .await
         {
-            Ok(response) => Ok(Some(response)),
+            Ok(mut response) => {
+                for account in &mut response.accounts {
+                    clean_account(account);
+                }
+                Ok(Some(response))
+            }
             Err(error) if error.status == 404 || error.status == 405 => Ok(None),
             Err(error) => Err(error),
         }
@@ -482,7 +490,9 @@ impl OthcloudApi {
                 Some(json!({ "token": token, "deployProvider": deploy_provider })),
             )
             .await?;
-        Ok(response.account)
+        let mut account = response.account;
+        clean_account(&mut account);
+        Ok(account)
     }
 
     pub async fn remove_github_account(&self, id: &str) -> Result<(), ApiError> {
@@ -632,9 +642,43 @@ fn parse_success_body<T: DeserializeOwned>(status: u16, bytes: &[u8]) -> serde_j
     }
 }
 
+/// Removes the " (from Dokploy)" suffix OTHCloud's Dokploy import added to the
+/// names of the git providers it copied over: an import detail, not part of
+/// the name the user knows the provider by.
+pub fn clean_account_name(name: &str) -> String {
+    const SUFFIX: &str = "(from dokploy)";
+    let trimmed = name.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    match lower.strip_suffix(SUFFIX) {
+        Some(rest) if !rest.trim().is_empty() => trimmed[..rest.len()].trim_end().to_string(),
+        _ => trimmed.to_string(),
+    }
+}
+
+fn clean_optional_name(name: &mut Option<String>) {
+    if let Some(value) = name.as_mut() {
+        *value = clean_account_name(value);
+    }
+}
+
+fn clean_account(account: &mut GithubAccount) {
+    account.label = clean_account_name(&account.label);
+    clean_optional_name(&mut account.app_name);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_clean_account_name() {
+        assert_eq!(clean_account_name("devdamo (from Dokploy)"), "devdamo");
+        assert_eq!(clean_account_name("WebByte-Games (from dokploy) "), "WebByte-Games");
+        assert_eq!(clean_account_name("devdamo"), "devdamo");
+        // A name that is only the suffix is kept rather than emptied.
+        assert_eq!(clean_account_name("(from Dokploy)"), "(from Dokploy)");
+        assert_eq!(clean_account_name("Dokploy app"), "Dokploy app");
+    }
 
     #[test]
     fn test_services_with_and_without_applications() {
