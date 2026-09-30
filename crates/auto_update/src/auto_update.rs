@@ -1792,7 +1792,7 @@ mod tests {
                 let (old_releases, new_releases) = (old_releases.clone(), new_releases.clone());
                 async move {
                     if req.uri().host() == Some("api.github.com")
-                        && req.uri().path() == "/repos/OverTimeHosting/Oterminal/releases"
+                        && req.uri().path() == "/repos/OverTimeHosting/OTerminal-Rust/releases"
                     {
                         let (etag, body) = if release_available {
                             ("\"new\"", new_releases)
@@ -1941,7 +1941,7 @@ mod tests {
                 let releases = releases.clone();
                 let downloads = downloads_in_handler.clone();
                 async move {
-                    if req.uri().path() == "/repos/OverTimeHosting/Oterminal/releases" {
+                    if req.uri().path() == "/repos/OverTimeHosting/OTerminal-Rust/releases" {
                         return Ok(Response::builder().status(200).body(releases.into()).unwrap());
                     }
                     if req.uri().path() == "/tampered" {

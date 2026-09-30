@@ -1,6 +1,10 @@
-# Releasing OTerminal 2.x (the `rust` branch)
+# Releasing OTerminal 2.x
 
-Every push to `rust` builds, versions and publishes OTerminal. Installed
+This repository (`OverTimeHosting/OTerminal-Rust`) holds OTerminal 2.x, the
+Rust/Zed-based OTerminal. The VS Code-based OTerminal 1.x stays in
+`OverTimeHosting/Oterminal` with its own releases.
+
+Every push to `main` builds, versions and publishes OTerminal. Installed
 copies find the new release on GitHub and update themselves. This file covers
 how that works, what has to be set up once, and how to run the builds on your
 own machine.
@@ -32,13 +36,13 @@ is what makes a later switch-over possible.
 To test the updater against real releases, run an installed build with
 `OTERMINAL_APP_VERSION=2.0.0` so it thinks it is older than it is.
 
-## What happens on a push to `rust`
+## What happens on a push to `main`
 
 Workflow: `.github/workflows/rust-release.yml`.
 
 1. **prepare** (ubuntu, about 1 min): skips commits whose message contains
    `[skip ci]` or `chore(release):`. Otherwise it bumps the patch number in
-   `OTERMINAL_VERSION`, commits `chore(release): vX.Y.Z [skip ci]` to `rust`,
+   `OTERMINAL_VERSION`, commits `chore(release): vX.Y.Z [skip ci]` to `main`,
    and pushes the annotated tag `vX.Y.Z`. If that tag already exists (left by
    an earlier failed run), it moves on to the next free number.
 2. **windows**: checks out the bump commit and runs
@@ -47,8 +51,8 @@ Workflow: `.github/workflows/rust-release.yml`.
    installer. The job stages:
    - `OTerminal-X.Y.Z-windows-x86_64-setup.exe`
    - `SHA256SUMS.txt` (`sha256sum` format)
-3. **release** (ubuntu): verifies the checksums and creates a GitHub
-   **pre-release** with `--latest=false`. The release notes list the commits
+3. **release** (ubuntu): verifies the checksums and creates a GitHub release
+   marked **latest**. The release notes list the commits
    since the previous `v2+` tag, without the `chore(release)` commits.
 4. **cleanup**: if the build or release failed, deletes the tag, so the next
    release's notes still start from the last *published* version. The bump
@@ -77,7 +81,7 @@ Code: `crates/auto_update/src/auto_update.rs` and `github_release.rs`.
 - It checks on startup and then every 4 hours, plus whenever you run *Check
   for Updates* (the OTerminal menu, or `auto update: check` in the command
   palette).
-- It calls `GET https://api.github.com/repos/OverTimeHosting/Oterminal/releases`,
+- It calls `GET https://api.github.com/repos/OverTimeHosting/OTerminal-Rust/releases`,
   unauthenticated.
 - The ETag is cached for the session, so repeat checks return `304 Not
   Modified` and do not count against the 60 requests/hour limit.
@@ -90,7 +94,8 @@ Code: `crates/auto_update/src/auto_update.rs` and `github_release.rs`.
   line's `v1.110.x` tags are ignored.
 - Drafts are skipped.
 - Pre-releases are included while `"auto_update_include_prereleases": true`,
-  which is the default. Every 2.x release is a pre-release for now.
+  which is the default. CI publishes normal releases; the setting is there for
+  a future beta channel.
 - The newest remaining release that has an asset for this platform wins
   (`OTerminal-<ver>-windows-x86_64-setup.exe`), but only if it is newer than
   the running version.
@@ -135,22 +140,19 @@ Code: `crates/auto_update/src/auto_update.rs` and `github_release.rs`.
    token with the `workflow` scope:
    ```sh
    gh auth refresh -h github.com -s workflow
-   git push origin rust
+   git push origin main
    ```
 2. **Workflow permissions.** Settings → Actions → General → *Workflow
    permissions* must let `GITHUB_TOKEN` write contents: either "Read and
    write permissions", or leave "Read" and rely on the workflow's own
    `permissions: contents: write`, as long as the organization does not
-   forbid it. The job pushes the bump commit and tag to `rust` and creates
-   the release. If `rust` is ever branch-protected, allow GitHub Actions to
+   forbid it. The job pushes the bump commit and tag to `main` and creates
+   the release. If `main` is ever branch-protected, allow GitHub Actions to
    push to it.
-3. **Manual runs (optional).** GitHub only lists `workflow_dispatch` workflows
-   that exist on the default branch (`main`). To get the *Run workflow*
-   button, copy `.github/workflows/rust-release.yml` to `main` unchanged. Its
-   push trigger only matches `rust`, so it never runs for `main` pushes and
-   does not interfere with `build.yml`.
-4. **No secrets are required.** Builds are unsigned (see Risks).
-5. **Repository variables (optional).** Settings → Secrets and variables →
+3. **No secrets are required.** Builds are unsigned (see Risks). *Run
+   workflow* is available on the Actions tab, since the workflow lives on the
+   default branch.
+4. **Repository variables (optional).** Settings → Secrets and variables →
    Actions → Variables:
 
    | Variable | Default | Meaning |
@@ -164,12 +166,12 @@ Code: `crates/auto_update/src/auto_update.rs` and `github_release.rs`.
 
 ## Cutting the first release
 
-1. Commit these changes on `rust`. `OTERMINAL_VERSION` holds `2.0.0`.
-2. Push them (step 1 above). The push itself triggers the workflow:
+1. `OTERMINAL_VERSION` holds `2.0.0`.
+2. Push `main` (step 1 above). The push itself triggers the workflow:
    `prepare` bumps to **2.0.1**, commits `chore(release): v2.0.1 [skip ci]`
-   and tags `v2.0.1`. Then the build and pre-release follow.
+   and tags `v2.0.1`. Then the build and release follow.
 3. Watch it with `gh run watch` or on the Actions tab. Afterwards run
-   `git pull` on `rust` to get the bump commit.
+   `git pull` to get the bump commit.
 4. Install `OTerminal-2.0.1-windows-x86_64-setup.exe` from the release by hand
    **once** on each machine. Copies built before this change still point at
    Zed's servers and cannot find the GitHub release. The installer keeps the
@@ -211,7 +213,7 @@ hosted build into an incremental one.
    up to 24 h. Switch the variable if you will be away.
 
 Security: this repository is **public**. The workflow only runs on pushes to
-`rust` and on manual dispatch, never on `pull_request`, so strangers' PRs
+`main` and on manual dispatch, never on `pull_request`, so strangers' PRs
 cannot run code on your machine. Keep it that way. If you add PR builds, run
 them on GitHub-hosted runners only.
 
@@ -243,23 +245,14 @@ That is this repository's old name, which GitHub redirects. The call:
 - updates only when the tag is newer than the running `1.110.x`;
 - only takes an asset matching `/win32-x64-user-setup\.exe$/i`.
 
-Today three things keep the two lines apart: 2.x releases are pre-releases,
-they are never marked latest, and their asset names do not match. When 2.x is
-ready for everyone:
-
-1. **Stop marking 2.x as pre-release.** Drop `--prerelease` and
-   `--latest=false` in the release job.
-2. **Mind what that exposes.** `/releases/latest` will then return a 2.x
-   release. Old VS Code-based installs see the newer version but no matching
-   asset, so they log a warning and do nothing (safe, but they stay on 1.110).
-3. **Move those users over** with one final VS Code-line release (`1.110.N`
-   from `main`) that tells them about OTerminal 2, links to or downloads
-   `OTerminal-2.x-windows-x86_64-setup.exe`, and then stops checking.
-   Do **not** attach a 2.x installer named `*-win32-x64-user-setup.exe` to a
-   2.x release: the VS Code updater would run it with VS Code's
-   inno-updater arguments, which `zed.iss` does not understand.
-4. Keep `auto_update_include_prereleases` as a setting for a future
-   beta channel. Stable users can turn it off once stable releases exist.
+That is the other repository, so 2.x releases here are never offered to
+1.x installs. When 2.x is ready for everyone, move those users over with one
+final 1.x release (`1.110.N` from `OverTimeHosting/Oterminal`) that tells
+them about OTerminal 2, links to or downloads the latest
+`OTerminal-2.x-windows-x86_64-setup.exe` from this repository, and then stops
+checking. Do **not** name a 2.x installer `*-win32-x64-user-setup.exe`: the
+VS Code updater would run it with VS Code's inno-updater arguments, which
+`zed.iss` does not understand.
 
 ## Risks and known limitations
 
@@ -278,9 +271,8 @@ ready for everyone:
 - **The hosted fast profile** (no LTO, codegen-units=16, no debug info)
   produces a somewhat larger and slightly slower binary than the full profile.
   Self-hosted builds use the full profile by default.
-- **Cache pressure.** The GitHub Actions cache is 10 GB per repository and is
-  shared with `main`'s npm caches. sccache entries may get evicted, making
-  hosted builds slower.
+- **Cache pressure.** The GitHub Actions cache is 10 GB per repository.
+  sccache entries may get evicted, making hosted builds slower.
 - **Updating while other terminals are open.** `amd_ags_x64.dll` is not
   replaced by auto-updates because the running app may have it loaded. Its
   version is pinned, so this only matters if the AGS SDK is ever bumped (a

@@ -1676,7 +1676,7 @@
   // Default: false
   "disable_ai": true,
   // Automatically check for OTerminal updates (GitHub releases of
-  // OverTimeHosting/Oterminal) on startup and every few hours, and download
+  // OverTimeHosting/OTerminal-Rust) on startup and every few hours, and download
   // them in the background. Updates are only applied when you click
   // "Restart to Update" (or on the next quit). This setting may be ignored on
   // Linux if installed through a package manager.

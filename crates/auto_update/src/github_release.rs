@@ -19,16 +19,16 @@ use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 
 /// `owner/repo` the releases are published to.
-pub const GITHUB_REPOSITORY: &str = "OverTimeHosting/Oterminal";
+pub const GITHUB_REPOSITORY: &str = "OverTimeHosting/OTerminal-Rust";
 
 /// The releases listing (newest first). 50 per page is plenty: the VS Code
 /// line is no longer released from here once the Rust line takes over, and
 /// until then we only need the newest few Rust releases.
 pub const RELEASES_API_URL: &str =
-    "https://api.github.com/repos/OverTimeHosting/Oterminal/releases?per_page=50";
+    "https://api.github.com/repos/OverTimeHosting/OTerminal-Rust/releases?per_page=50";
 
 /// Human-facing releases page.
-pub const RELEASES_PAGE_URL: &str = "https://github.com/OverTimeHosting/Oterminal/releases";
+pub const RELEASES_PAGE_URL: &str = "https://github.com/OverTimeHosting/OTerminal-Rust/releases";
 
 /// Tags below this major version belong to the VS Code-based OTerminal.
 pub const MIN_RUST_LINE_MAJOR: u64 = 2;
@@ -305,8 +305,8 @@ mod tests {
     /// Trimmed-down but structurally faithful `GET /repos/{owner}/{repo}/releases` response.
     const RELEASES_JSON: &str = r#"[
       {
-        "url": "https://api.github.com/repos/OverTimeHosting/Oterminal/releases/3",
-        "html_url": "https://github.com/OverTimeHosting/Oterminal/releases/tag/v1.110.34",
+        "url": "https://api.github.com/repos/OverTimeHosting/OTerminal-Rust/releases/3",
+        "html_url": "https://github.com/OverTimeHosting/OTerminal-Rust/releases/tag/v1.110.34",
         "tag_name": "v1.110.34",
         "name": "OTerminal 1.110.34",
         "draft": false,
@@ -315,14 +315,14 @@ mod tests {
         "assets": [
           {
             "name": "oterminal-1.110.34-win32-x64-user-setup.exe",
-            "browser_download_url": "https://github.com/OverTimeHosting/Oterminal/releases/download/v1.110.34/oterminal-1.110.34-win32-x64-user-setup.exe",
+            "browser_download_url": "https://github.com/OverTimeHosting/OTerminal-Rust/releases/download/v1.110.34/oterminal-1.110.34-win32-x64-user-setup.exe",
             "size": 120000000,
             "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
           }
         ]
       },
       {
-        "html_url": "https://github.com/OverTimeHosting/Oterminal/releases/tag/v2.0.3",
+        "html_url": "https://github.com/OverTimeHosting/OTerminal-Rust/releases/tag/v2.0.3",
         "tag_name": "v2.0.3",
         "name": "OTerminal 2.0.3",
         "draft": true,
@@ -336,7 +336,7 @@ mod tests {
         ]
       },
       {
-        "html_url": "https://github.com/OverTimeHosting/Oterminal/releases/tag/v2.0.2",
+        "html_url": "https://github.com/OverTimeHosting/OTerminal-Rust/releases/tag/v2.0.2",
         "tag_name": "v2.0.2",
         "name": "OTerminal 2.0.2",
         "draft": false,
@@ -345,33 +345,33 @@ mod tests {
         "assets": [
           {
             "name": "OTerminal-2.0.2-windows-x86_64-setup.exe",
-            "browser_download_url": "https://github.com/OverTimeHosting/Oterminal/releases/download/v2.0.2/OTerminal-2.0.2-windows-x86_64-setup.exe",
+            "browser_download_url": "https://github.com/OverTimeHosting/OTerminal-Rust/releases/download/v2.0.2/OTerminal-2.0.2-windows-x86_64-setup.exe",
             "size": 95000000,
             "digest": "sha256:ABCDEFabcdef0123456789abcdef0123456789abcdef0123456789abcdef0123"
           },
           {
             "name": "SHA256SUMS.txt",
-            "browser_download_url": "https://github.com/OverTimeHosting/Oterminal/releases/download/v2.0.2/SHA256SUMS.txt",
+            "browser_download_url": "https://github.com/OverTimeHosting/OTerminal-Rust/releases/download/v2.0.2/SHA256SUMS.txt",
             "size": 100,
             "digest": null
           }
         ]
       },
       {
-        "html_url": "https://github.com/OverTimeHosting/Oterminal/releases/tag/v2.0.1",
+        "html_url": "https://github.com/OverTimeHosting/OTerminal-Rust/releases/tag/v2.0.1",
         "tag_name": "v2.0.1",
         "draft": false,
         "prerelease": false,
         "assets": [
           {
             "name": "OTerminal-2.0.1-windows-x86_64-setup.exe",
-            "browser_download_url": "https://github.com/OverTimeHosting/Oterminal/releases/download/v2.0.1/OTerminal-2.0.1-windows-x86_64-setup.exe",
+            "browser_download_url": "https://github.com/OverTimeHosting/OTerminal-Rust/releases/download/v2.0.1/OTerminal-2.0.1-windows-x86_64-setup.exe",
             "size": 94000000
           }
         ]
       },
       {
-        "html_url": "https://github.com/OverTimeHosting/Oterminal/releases/tag/v1.110.33",
+        "html_url": "https://github.com/OverTimeHosting/OTerminal-Rust/releases/tag/v1.110.33",
         "tag_name": "v1.110.33",
         "draft": false,
         "prerelease": false,
@@ -427,7 +427,7 @@ mod tests {
         assert_eq!(candidate.size, 95000000);
         assert_eq!(
             candidate.html_url,
-            "https://github.com/OverTimeHosting/Oterminal/releases/tag/v2.0.2"
+            "https://github.com/OverTimeHosting/OTerminal-Rust/releases/tag/v2.0.2"
         );
         assert_eq!(
             candidate.sha256_from_digest.as_deref(),
@@ -436,7 +436,7 @@ mod tests {
         assert_eq!(
             candidate.checksums_url.as_deref(),
             Some(
-                "https://github.com/OverTimeHosting/Oterminal/releases/download/v2.0.2/SHA256SUMS.txt"
+                "https://github.com/OverTimeHosting/OTerminal-Rust/releases/download/v2.0.2/SHA256SUMS.txt"
             )
         );
     }

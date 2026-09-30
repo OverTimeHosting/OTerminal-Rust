@@ -52,7 +52,7 @@ impl UpdateVersion {
             },
             AutoUpdateStatus::Updated { .. } => AutoUpdateStatus::UpdateAvailable {
                 version: Version::new(2, 99, 0),
-                url: "https://github.com/OverTimeHosting/Oterminal/releases".to_string(),
+                url: "https://github.com/OverTimeHosting/OTerminal-Rust/releases".to_string(),
             },
             AutoUpdateStatus::UpdateAvailable { .. } => AutoUpdateStatus::Errored {
                 error: Arc::new(anyhow!("Network timeout")),
