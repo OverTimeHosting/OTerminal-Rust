@@ -137,6 +137,53 @@ impl AppVersion {
     }
 }
 
+struct GlobalOTerminalVersion(Version);
+
+impl Global for GlobalOTerminalVersion {}
+
+/// OTerminal's own product version (the repository's `OTERMINAL_VERSION` file,
+/// bumped by CI on every release).
+///
+/// This is deliberately separate from [`AppVersion`], which stays at the Zed
+/// version this fork is based on: extensions, remote servers, the dev-env API
+/// and other Zed-compatible services key off that one.
+pub struct OTerminalVersion;
+
+impl OTerminalVersion {
+    /// Parses the compiled-in OTerminal version. The `OTERMINAL_APP_VERSION`
+    /// environment variable overrides it at runtime, which is handy for
+    /// testing the updater against real releases.
+    pub fn load(compiled_version: &str) -> Version {
+        if let Ok(from_env) = env::var("OTERMINAL_APP_VERSION")
+            && let Ok(version) = from_env.trim().trim_start_matches('v').parse()
+        {
+            return version;
+        }
+        compiled_version
+            .trim()
+            .trim_start_matches('v')
+            .parse()
+            .unwrap_or_else(|_| Version::new(0, 0, 0))
+    }
+
+    /// Sets the global OTerminal version.
+    pub fn set_global(version: Version, cx: &mut App) {
+        cx.set_global(GlobalOTerminalVersion(version));
+    }
+
+    /// Returns the OTerminal version. Falls back to [`AppVersion`] (without
+    /// build metadata) when it was never set, e.g. in tests.
+    pub fn global(cx: &App) -> Version {
+        if let Some(version) = cx.try_global::<GlobalOTerminalVersion>() {
+            version.0.clone()
+        } else {
+            let mut version = AppVersion::global(cx);
+            version.build = semver::BuildMetadata::EMPTY;
+            version
+        }
+    }
+}
+
 /// A Zed release channel.
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Default)]
 pub enum ReleaseChannel {
@@ -285,7 +332,23 @@ impl FromStr for ReleaseChannel {
 
 #[cfg(test)]
 mod tests {
-    use super::ReleaseChannel;
+    use super::{OTerminalVersion, ReleaseChannel};
+
+    #[test]
+    fn test_oterminal_version_load() {
+        assert_eq!(
+            OTerminalVersion::load("2.0.7\n"),
+            semver::Version::new(2, 0, 7)
+        );
+        assert_eq!(
+            OTerminalVersion::load("v2.1.0"),
+            semver::Version::new(2, 1, 0)
+        );
+        assert_eq!(
+            OTerminalVersion::load("garbage"),
+            semver::Version::new(0, 0, 0)
+        );
+    }
 
     #[test]
     fn test_docs_url_for_release_channel() {

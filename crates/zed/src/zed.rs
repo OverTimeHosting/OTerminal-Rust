@@ -1546,8 +1546,11 @@ fn open_about_window(cx: &mut App) {
         fn new(cx: &mut Context<Self>) -> Self {
             let release_channel = ReleaseChannel::global(cx);
             let release_channel_name = release_channel.display_name();
-            let full_version: SharedString = AppVersion::global(cx).to_string().into();
-            let version = env!("CARGO_PKG_VERSION");
+            // OTerminal's own version first; the Zed version it is based on is
+            // kept as the "full" version (extensions/remote servers key off it).
+            let version = release_channel::OTerminalVersion::global(cx);
+            let full_version: SharedString =
+                format!("{version} (based on Zed {})", AppVersion::global(cx)).into();
 
             let debug = if cfg!(debug_assertions) {
                 "(debug)"

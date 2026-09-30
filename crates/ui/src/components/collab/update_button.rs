@@ -100,19 +100,19 @@ impl UpdateButton {
     }
 
     pub fn checking() -> Self {
-        Self::new(IconName::LoadCircle, "Checking for Zed Updates…")
+        Self::new(IconName::LoadCircle, "Checking for OTerminal Updates…")
             .icon_animate(true)
             .disabled(true)
     }
 
     pub fn downloading(progress: Option<f32>) -> Self {
-        Self::new(IconName::Download, "Downloading Zed Update…")
+        Self::new(IconName::Download, "Downloading OTerminal Update…")
             .progress(progress)
             .disabled(true)
     }
 
     pub fn installing(version: impl Into<SharedString>) -> Self {
-        Self::new(IconName::LoadCircle, "Installing Zed Update…")
+        Self::new(IconName::LoadCircle, "Installing OTerminal Update…")
             .icon_animate(true)
             .tooltip(version)
             .disabled(true)
@@ -120,6 +120,14 @@ impl UpdateButton {
 
     pub fn updated(version: impl Into<SharedString>) -> Self {
         Self::new(IconName::Download, "Restart to Update")
+            .tooltip(version)
+            .with_dismiss()
+    }
+
+    /// A newer release exists but has to be installed by hand (development
+    /// builds and portable copies); clicking opens the release page.
+    pub fn available(version: impl Into<SharedString>) -> Self {
+        Self::new(IconName::Download, "Update Available")
             .tooltip(version)
             .with_dismiss()
     }

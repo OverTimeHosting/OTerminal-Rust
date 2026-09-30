@@ -39,6 +39,14 @@ fn main() {
         println!("cargo:rustc-link-arg=-Wl,-weak_framework,ScreenCaptureKit");
     }
 
+    // OTerminal's own version (bumped by CI) lives in the repository root, separate
+    // from this crate's version, which tracks the Zed release OTerminal is based on.
+    println!("cargo:rerun-if-changed=../../OTERMINAL_VERSION");
+    let oterminal_version = std::fs::read_to_string("../../OTERMINAL_VERSION")
+        .map(|version| version.trim().to_string())
+        .unwrap_or_else(|_| std::env::var("CARGO_PKG_VERSION").unwrap_or_default());
+    println!("cargo:rustc-env=OTERMINAL_VERSION={oterminal_version}");
+
     // Populate git sha environment variable if git is available
     println!("cargo:rerun-if-changed=../../.git/logs/HEAD");
     println!(

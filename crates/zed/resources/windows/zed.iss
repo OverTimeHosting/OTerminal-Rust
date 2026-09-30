@@ -12,7 +12,7 @@ AppVerName={#AppDisplayName}
 AppPublisher=OverTime Hosting
 AppPublisherURL=https://othcloud.xyz/
 AppSupportURL=https://othcloud.xyz/
-AppUpdatesURL=https://othcloud.xyz/
+AppUpdatesURL=https://github.com/OverTimeHosting/Oterminal/releases
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
 DisableReadyPage=yes
@@ -79,7 +79,9 @@ Source: "{#ResourcesDir}\tools\*"; DestDir: "{app}\tools"; Flags: ignoreversion
 Source: "{#ResourcesDir}\appx\*"; DestDir: "{app}\appx";  BeforeInstall: RemoveAppxPackage; AfterInstall: AddAppxPackage; Flags: ignoreversion; Check: UseModernContextMenu
 #endif
 #ifexist ResourcesDir + "\amd_ags_x64.dll"
-Source: "{#ResourcesDir}\amd_ags_x64.dll"; DestDir: "{app}"; Flags: ignoreversion
+; Not replaced by auto-updates (/update=true): the running app may have it
+; loaded, and the AGS SDK version is pinned by script/bundle-windows.ps1.
+Source: "{#ResourcesDir}\amd_ags_x64.dll"; DestDir: "{app}"; Flags: ignoreversion; Check: not IsUpdating
 #endif
 #ifexist ResourcesDir + "\x64\OpenConsole.exe"
 Source: "{#ResourcesDir}\x64\OpenConsole.exe"; DestDir: "{code:GetInstallDir}\x64"; Flags: ignoreversion

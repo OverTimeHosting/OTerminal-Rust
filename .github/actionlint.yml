@@ -34,6 +34,8 @@ self-hosted-runner:
     # Self Hosted Runners
     - self-mini-macos
     - self-32vcpu-windows-2022
+    # OTerminal self-hosted Windows builder (see RELEASING.md)
+    - oterminal
 
 # Disable shellcheck because it doesn't like powershell
 # This should have been triggered with initial rollout of actionlint

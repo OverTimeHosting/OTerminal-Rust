@@ -19,9 +19,23 @@ fn git_sha() -> Option<String> {
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+const OTERMINAL_VERSION_PATH: &str =
+    concat!(env!("CARGO_MANIFEST_DIR"), "/../../OTERMINAL_VERSION");
+
+/// OTerminal's own version (the `OTERMINAL_VERSION` file in the repository
+/// root), falling back to the crate version being built.
+fn oterminal_version() -> String {
+    println!("cargo:rerun-if-changed={OTERMINAL_VERSION_PATH}");
+    std::fs::read_to_string(OTERMINAL_VERSION_PATH)
+        .map(|version| version.trim().to_string())
+        .ok()
+        .filter(|version| !version.is_empty())
+        .unwrap_or_else(|| std::env::var("CARGO_PKG_VERSION").unwrap_or_default())
+}
+
 fn product_version() -> String {
     let commit_sha = git_sha();
-    let pkg_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+    let pkg_version = oterminal_version();
     let channel = std::env::var("RELEASE_CHANNEL").unwrap_or_else(|_| "dev".into());
     let build_id = std::env::var("GITHUB_RUN_NUMBER").ok();
 
@@ -59,7 +73,7 @@ pub fn compile(manifest: bool) -> Result<(), Box<dyn std::error::Error>> {
         String::new()
     };
 
-    let pkg_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+    let pkg_version = oterminal_version();
     let product_version = product_version();
     let mut version_parts = pkg_version
         .split('.')

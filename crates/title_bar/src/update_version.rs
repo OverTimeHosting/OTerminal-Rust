@@ -50,7 +50,11 @@ impl UpdateVersion {
             AutoUpdateStatus::Installing { .. } => AutoUpdateStatus::Updated {
                 version: Version::new(1, 99, 0),
             },
-            AutoUpdateStatus::Updated { .. } => AutoUpdateStatus::Errored {
+            AutoUpdateStatus::Updated { .. } => AutoUpdateStatus::UpdateAvailable {
+                version: Version::new(2, 99, 0),
+                url: "https://github.com/OverTimeHosting/Oterminal/releases".to_string(),
+            },
+            AutoUpdateStatus::UpdateAvailable { .. } => AutoUpdateStatus::Errored {
                 error: Arc::new(anyhow!("Network timeout")),
             },
             AutoUpdateStatus::Errored { .. } => AutoUpdateStatus::Idle,
@@ -117,10 +121,19 @@ impl Render for UpdateVersion {
             }
             AutoUpdateStatus::Updated { version } => {
                 let version = Self::version_tooltip_message(version);
+                // Only restarts when the user clicks; OTerminal never restarts on its own.
                 UpdateButton::updated(version)
                     .on_click(|_, _, cx| {
                         workspace::reload(cx);
                     })
+                    .on_dismiss(cx.listener(|this, _, _window, cx| this.dismiss(cx)))
+                    .into_any_element()
+            }
+            AutoUpdateStatus::UpdateAvailable { version, url } => {
+                let tooltip = format!("OTerminal {version} is available. Click to download it.");
+                let url = url.clone();
+                UpdateButton::available(tooltip)
+                    .on_click(move |_, _, cx| cx.open_url(&url))
                     .on_dismiss(cx.listener(|this, _, _window, cx| this.dismiss(cx)))
                     .into_any_element()
             }

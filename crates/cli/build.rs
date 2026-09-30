@@ -10,6 +10,13 @@ fn main() {
         println!("cargo:rustc-env=MACOSX_DEPLOYMENT_TARGET=10.15.7");
     }
 
+    // OTerminal's own version (see the OTERMINAL_VERSION file in the repository root).
+    println!("cargo:rerun-if-changed=../../OTERMINAL_VERSION");
+    let oterminal_version = std::fs::read_to_string("../../OTERMINAL_VERSION")
+        .map(|version| version.trim().to_string())
+        .unwrap_or_else(|_| std::env::var("CARGO_PKG_VERSION").unwrap_or_default());
+    println!("cargo:rustc-env=OTERMINAL_VERSION={oterminal_version}");
+
     // Populate git sha environment variable if git is available
     println!("cargo:rerun-if-changed=../../.git/logs/HEAD");
     if let Some(output) = Command::new("git")

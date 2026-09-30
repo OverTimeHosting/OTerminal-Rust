@@ -1675,9 +1675,16 @@
   //
   // Default: false
   "disable_ai": true,
-  // Automatically update Zed. This setting may be ignored on Linux if
-  // installed through a package manager.
-  "auto_update": false,
+  // Automatically check for OTerminal updates (GitHub releases of
+  // OverTimeHosting/Oterminal) on startup and every few hours, and download
+  // them in the background. Updates are only applied when you click
+  // "Restart to Update" (or on the next quit). This setting may be ignored on
+  // Linux if installed through a package manager.
+  "auto_update": true,
+  // Whether updates may come from GitHub releases marked as pre-releases.
+  // Every OTerminal 2.x release is a pre-release for now, so turning this off
+  // stops updates until stable releases are published.
+  "auto_update_include_prereleases": true,
   // How to render LSP `textDocument/documentColor` colors in the editor.
   //
   // Possible values:

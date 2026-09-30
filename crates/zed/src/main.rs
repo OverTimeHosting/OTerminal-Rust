@@ -501,6 +501,10 @@ fn main() {
         zed_actions::init();
 
         release_channel::init(app_version, cx);
+        release_channel::OTerminalVersion::set_global(
+            release_channel::OTerminalVersion::load(env!("OTERMINAL_VERSION")),
+            cx,
+        );
         gpui_tokio::init(cx);
         if let Some(app_commit_sha) = app_commit_sha {
             AppCommitSha::set_global(app_commit_sha, cx);

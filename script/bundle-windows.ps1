@@ -34,7 +34,9 @@ $Architecture = if ($Architecture) {
     $OSArchitecture
 }
 
-$CargoOutDir = "./target/$Architecture-pc-windows-msvc/release"
+# Honour CARGO_TARGET_DIR (CI keeps the target dir on the drive with the most free space).
+$CargoTargetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { "./target" }
+$CargoOutDir = "$CargoTargetDir/$Architecture-pc-windows-msvc/release"
 
 # Keep in sync with the ConPTY version downloaded by crates/zed/build.rs.
 $ConptyVersionTag = "v1.24.10621.0"
@@ -136,13 +138,13 @@ function BuildOTerminalAndItsFriends {
     cargo --config .cargo/bundle-config.toml build --release --package zed --package cli --package auto_update_helper --target $target
 
     # The zed package's [[bin]] is named "oterminal"; fall back to zed.exe for older trees.
-    $appExe = ".\$CargoOutDir\oterminal.exe"
+    $appExe = "$CargoOutDir\oterminal.exe"
     if (-not (Test-Path $appExe)) {
-        $appExe = ".\$CargoOutDir\zed.exe"
+        $appExe = "$CargoOutDir\zed.exe"
     }
     Copy-Item -Path $appExe -Destination "$innoDir\oterminal.exe" -Force
-    Copy-Item -Path ".\$CargoOutDir\cli.exe" -Destination "$innoDir\cli.exe" -Force
-    Copy-Item -Path ".\$CargoOutDir\auto_update_helper.exe" -Destination "$innoDir\auto_update_helper.exe" -Force
+    Copy-Item -Path "$CargoOutDir\cli.exe" -Destination "$innoDir\cli.exe" -Force
+    Copy-Item -Path "$CargoOutDir\auto_update_helper.exe" -Destination "$innoDir\auto_update_helper.exe" -Force
 }
 
 function BuildRemoteServer {
@@ -150,7 +152,7 @@ function BuildRemoteServer {
     cargo --config .cargo/bundle-config.toml build --release --package remote_server --target $target
 
     # Create zipped remote server binary
-    $remoteServerSrc = (Resolve-Path ".\$CargoOutDir\remote_server.exe").Path
+    $remoteServerSrc = (Resolve-Path "$CargoOutDir\remote_server.exe").Path
 
     if ($canCodeSign) {
         Write-Output "Code signing remote_server.exe"
@@ -166,11 +168,11 @@ function BuildRemoteServer {
 
 function ZipOTerminalDebug {
     $items = @(
-        ".\$CargoOutDir\oterminal.pdb",
-        ".\$CargoOutDir\zed.pdb",
-        ".\$CargoOutDir\cli.pdb",
-        ".\$CargoOutDir\auto_update_helper.pdb",
-        ".\$CargoOutDir\remote_server.pdb"
+        "$CargoOutDir\oterminal.pdb",
+        "$CargoOutDir\zed.pdb",
+        "$CargoOutDir\cli.pdb",
+        "$CargoOutDir\auto_update_helper.pdb",
+        "$CargoOutDir\remote_server.pdb"
     ) | Where-Object { Test-Path $_ }
 
     if ($items.Count -gt 0) {
@@ -288,6 +290,16 @@ function BuildInstaller {
     # Windows runner 2022 default has iscc in PATH, https://github.com/actions/runner-images/blob/main/images/windows/Windows2022-Readme.md
     # Windows runner 2025 doesn't have iscc in PATH for now, https://github.com/actions/runner-images/issues/11228
     $innoSetupPath = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+    if ($env:ISCC_PATH) {
+        $innoSetupPath = $env:ISCC_PATH
+    } elseif (-not (Test-Path $innoSetupPath)) {
+        $iscc = Get-Command iscc.exe -ErrorAction SilentlyContinue
+        if ($iscc) {
+            $innoSetupPath = $iscc.Source
+        } elseif (Test-Path "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe") {
+            $innoSetupPath = "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+        }
+    }
 
     $definitions = @{
         "AppId"          = $appId
@@ -339,13 +351,14 @@ function BuildInstaller {
 }
 
 ParseZedWorkspace
-if ([string]::IsNullOrWhiteSpace($env:RELEASE_VERSION)) {
-    # Local builds: take the version from crates/zed/Cargo.toml.
-    $versionLine = Select-String -Path "$env:ZED_WORKSPACE\crates\zed\Cargo.toml" -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
-    if ($versionLine) {
-        $env:RELEASE_VERSION = $versionLine.Matches[0].Groups[1].Value
-    }
+# ParseZedWorkspace sets RELEASE_VERSION to the zed crate version (the Zed
+# release OTerminal is based on). The installer and the auto-updater use
+# OTerminal's own version instead: the OTERMINAL_VERSION file, bumped by CI.
+$oterminalVersionFile = Join-Path $env:ZED_WORKSPACE "OTERMINAL_VERSION"
+if (Test-Path $oterminalVersionFile) {
+    $env:RELEASE_VERSION = (Get-Content $oterminalVersionFile -Raw).Trim()
 }
+Write-Output "OTerminal version: $env:RELEASE_VERSION"
 $innoDir = "$env:ZED_WORKSPACE\inno\$Architecture"
 $debugArchive = "$CargoOutDir\oterminal-$env:RELEASE_VERSION-$env:ZED_RELEASE_CHANNEL.dbg.zip"
 
