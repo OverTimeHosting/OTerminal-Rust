@@ -416,7 +416,7 @@ impl OthcloudPanel {
                 .child(
                     h_flex()
                         .gap_2()
-                        .child(gpui::img("images/oth_logo.png").flex_none().size(px(28.)))
+                        .child(gpui::img("images/oth_logo_28.png").flex_none().size(px(28.)))
                         .child(Headline::new("Sign in to OTHCloud").size(HeadlineSize::Small)),
                 )
                 .child(
