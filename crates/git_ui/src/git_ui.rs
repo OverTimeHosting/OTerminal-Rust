@@ -77,6 +77,47 @@ pub fn set_clone_repository_handler(
     cx.set_global(CloneRepositoryHandler(std::sync::Arc::new(handler)));
 }
 
+/// OTerminal: an application-provided reaction to a push the remote rejected
+/// for lack of access (see [`set_push_access_denied_handler`]).
+pub(crate) struct PushAccessDeniedHandler(
+    pub(crate)  std::sync::Arc<
+        dyn Fn(&mut Workspace, &str, &mut Window, &mut Context<Workspace>) -> bool + Send + Sync,
+    >,
+);
+
+impl gpui::Global for PushAccessDeniedHandler {}
+
+/// Lets the application handle a push the remote rejected for lack of access
+/// (HTTP 401/403, "write access not granted", ...), e.g. to offer switching
+/// the account git authenticates as. `handler` gets the git error output and
+/// returns whether it showed something, in which case the panel skips its own
+/// error toast.
+pub fn set_push_access_denied_handler(
+    handler: impl Fn(&mut Workspace, &str, &mut Window, &mut Context<Workspace>) -> bool
+    + Send
+    + Sync
+    + 'static,
+    cx: &mut App,
+) {
+    cx.set_global(PushAccessDeniedHandler(std::sync::Arc::new(handler)));
+}
+
+/// Whether git's output for a failed push says the credentials lacked access.
+pub(crate) fn is_push_access_denied(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    [
+        "write access to repository not granted",
+        "permission to",
+        "the requested url returned error: 403",
+        "the requested url returned error: 401",
+        "authentication failed",
+        "invalid username or token",
+        "resource not accessible by integration",
+    ]
+    .iter()
+    .any(|needle| error.contains(needle))
+}
+
 pub fn init(cx: &mut App) {
     editor::set_blame_renderer(blame_ui::GitBlameRenderer, cx);
     commit_view::init(cx);

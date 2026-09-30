@@ -4562,11 +4562,26 @@ impl GitPanel {
             let remote_output = push.await?;
 
             let action = RemoteAction::Push(branch.name().to_owned().into(), remote);
-            this.update(cx, |this, cx| match remote_output {
+            this.update_in(cx, |this, window, cx| match remote_output {
                 Ok(remote_message) => this.show_remote_output(action, remote_message, cx),
                 Err(e) => {
                     log::error!("Error while pushing {:?}", e);
-                    this.show_error_toast(action.name(), e, cx)
+                    // OTerminal: let the app explain which account was refused
+                    // and offer another one.
+                    let message = format!("{e:#}");
+                    let handled = crate::is_push_access_denied(&message)
+                        && cx
+                            .try_global::<crate::PushAccessDeniedHandler>()
+                            .map(|handler| handler.0.clone())
+                            .zip(this.workspace.upgrade())
+                            .is_some_and(|(handler, workspace)| {
+                                workspace.update(cx, |workspace, cx| {
+                                    handler(workspace, &message, window, cx)
+                                })
+                            });
+                    if !handled {
+                        this.show_error_toast(action.name(), e, cx)
+                    }
                 }
             })?;
 

@@ -153,6 +153,11 @@ pub struct ActiveGithub {
     pub label: Option<String>,
     pub kind: GithubTokenKind,
     pub source: AccountSource,
+    /// Whether git pushes with this token. GitHub App installation tokens
+    /// (OTHCloud git providers) usually can't write, and a user token without
+    /// repository access can't either, so pushes then use the user's own git
+    /// credentials instead.
+    pub can_push: bool,
 }
 
 impl ActiveGithub {
@@ -169,6 +174,7 @@ impl ActiveGithub {
                 .filter(|label| !label.trim().is_empty()),
             kind: response.kind,
             source: AccountSource::Othcloud,
+            can_push: response.kind == GithubTokenKind::User && !response.needs_connect,
         }
     }
 
@@ -184,6 +190,8 @@ impl ActiveGithub {
             source: AccountSource::Local {
                 github_id: account.id,
             },
+            // Local tokens are checked for repository access when added.
+            can_push: true,
         }
     }
 
@@ -480,7 +488,15 @@ impl GithubAccountStore {
         local_accounts::remove(&mut self.local_accounts, github_id);
         self.persist_local_accounts(cx);
         if self.choice == ActiveChoice::Local(github_id) {
-            self.set_choice(ActiveChoice::Auto, cx);
+            // Move on to another account the user added here, if any; `Auto`
+            // hands github.com back to their own credential manager.
+            let next = self
+                .local_accounts
+                .first()
+                .map_or(ActiveChoice::Auto, |account| {
+                    ActiveChoice::Local(account.id)
+                });
+            self.set_choice(next, cx);
         }
         if self
             .current
@@ -781,9 +797,15 @@ impl GithubAccountStore {
     }
 
     fn install(&mut self, active: ActiveGithub, cx: &mut Context<Self>) {
+        let label = match active.source {
+            AccountSource::Othcloud => format!("{} (OTHCloud)", active.display_name()),
+            AccountSource::Local { .. } => active.display_name(),
+        };
         git::set_git_credential_override(Some(Arc::new(git::GithubTokenCredentials {
             hosts: vec![GITHUB_HOST_URL.to_string()],
             token: active.token.clone(),
+            allows_push: active.can_push,
+            label: Some(label),
         })));
         git::set_github_api_token(Some(active.token.clone()));
         self.current = Some(active);
@@ -1155,6 +1177,72 @@ fn notify_account_problem(message: String, cx: &mut App) {
     );
 }
 
+/// A push the remote refused for lack of access. Says which account git used
+/// and offers another one. Registered with `git_ui::set_push_access_denied_handler`;
+/// returns whether it showed the notification (else the git panel shows its
+/// own error).
+pub fn handle_push_access_denied(
+    workspace: &mut Workspace,
+    error: &str,
+    _window: &mut Window,
+    cx: &mut Context<Workspace>,
+) -> bool {
+    struct PushAccessDenied;
+
+    // Only pushes that went out with an OTerminal-provided token; a push with
+    // the user's own credentials failing is theirs to sort out in git.
+    let account = git::git_credential_override_applies(true)
+        .then(git::git_credential_account_label)
+        .flatten();
+    let reason = error
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("remote:") || line.starts_with("fatal:"))
+        .unwrap_or("GitHub refused access")
+        .trim_start_matches("remote:")
+        .trim_start_matches("fatal:")
+        .trim()
+        .to_string();
+    let message = match &account {
+        Some(account) => format!(
+            "Push rejected for GitHub account \"{account}\": {reason}\n\
+             Switch to an account that can write to this repository, or push with your own git login."
+        ),
+        None => format!(
+            "Push rejected: {reason}\n\
+             Your git login can't write to this repository. Sign in to a GitHub account that can."
+        ),
+    };
+
+    workspace.show_notification(NotificationId::unique::<PushAccessDenied>(), cx, move |cx| {
+        let message = message.clone();
+        cx.new(move |cx| {
+            let notification = MessageNotification::new(message, cx)
+                .primary_message("Switch Account")
+                .primary_icon(IconName::Github)
+                .primary_on_click(|window, cx| {
+                    window.dispatch_action(Box::new(SwitchGithubAccount), cx);
+                });
+            if account.is_some() {
+                notification
+                    .secondary_message("Use My Git Login")
+                    .secondary_on_click(|_, cx| {
+                        if let Some(store) = GithubAccountStore::global(cx) {
+                            store.update(cx, |store, cx| store.use_no_account(cx));
+                        }
+                    })
+            } else {
+                notification
+                    .secondary_message("Sign In to GitHub")
+                    .secondary_on_click(|window, cx| {
+                        window.dispatch_action(Box::new(SignInToGithub), cx);
+                    })
+            }
+        })
+    });
+    true
+}
+
 pub(crate) fn handle_othcloud_unauthorized(cx: &mut App) {
     if let Some(account) = OthcloudAccount::global(cx) {
         account.update(cx, |account, cx| account.handle_unauthorized(cx));
@@ -1477,7 +1565,7 @@ mod tests {
         cx.run_until_parked();
         cx.read(|cx| {
             let store = store.read(cx);
-            assert_eq!(store.choice(), ActiveChoice::Auto);
+            assert_eq!(store.choice(), ActiveChoice::Local(8));
             assert_eq!(store.local_accounts().len(), 1);
             assert_eq!(store.resolved(cx), ResolvedAccount::Local(8));
         });

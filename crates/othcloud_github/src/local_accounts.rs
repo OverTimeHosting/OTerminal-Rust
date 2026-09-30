@@ -102,8 +102,10 @@ pub fn remove(accounts: &mut Vec<LocalGithubAccount>, github_id: u64) -> bool {
 /// Which GitHub identity the user chose for git, persisted across restarts.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ActiveChoice {
-    /// Nothing chosen yet: OTHCloud's account when signed in, else the first
-    /// local account, else none.
+    /// Nothing chosen yet: git keeps using the user's own credential manager.
+    /// OTerminal only takes over github.com credentials for an account the
+    /// user picked, because OTHCloud's default account can be an
+    /// organization's GitHub App that can't push to the user's repositories.
     #[default]
     Auto,
     /// No account: git uses the user's own credential manager.
@@ -164,11 +166,11 @@ pub fn resolve(
         }
     };
     match choice {
-        ActiveChoice::None => ResolvedAccount::None,
+        ActiveChoice::None | ActiveChoice::Auto => ResolvedAccount::None,
         ActiveChoice::Local(id) if local_accounts.iter().any(|account| account.id == id) => {
             ResolvedAccount::Local(id)
         }
-        ActiveChoice::Local(_) | ActiveChoice::Auto | ActiveChoice::Othcloud => fallback(),
+        ActiveChoice::Local(_) | ActiveChoice::Othcloud => fallback(),
     }
 }
 
@@ -277,10 +279,13 @@ mod tests {
         assert_eq!(resolve(ActiveChoice::Local(9), &locals, true), R::Othcloud);
         // Explicit "none" means the user's own credential manager.
         assert_eq!(resolve(ActiveChoice::None, &locals, true), R::None);
-        // Auto / OTHCloud prefer OTHCloud when signed in.
-        assert_eq!(resolve(ActiveChoice::Auto, &locals, true), R::Othcloud);
-        assert_eq!(resolve(ActiveChoice::Othcloud, &locals, false), R::Local(7));
+        // Auto never takes over git's credentials, signed in or not.
+        assert_eq!(resolve(ActiveChoice::Auto, &locals, true), R::None);
+        assert_eq!(resolve(ActiveChoice::Auto, &locals, false), R::None);
         assert_eq!(resolve(ActiveChoice::Auto, &[], false), R::None);
+        // An explicit OTHCloud choice falls back to a local account when signed out.
+        assert_eq!(resolve(ActiveChoice::Othcloud, &[], true), R::Othcloud);
+        assert_eq!(resolve(ActiveChoice::Othcloud, &locals, false), R::Local(7));
         assert_eq!(resolve(ActiveChoice::Othcloud, &[], false), R::None);
     }
 

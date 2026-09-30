@@ -2787,7 +2787,7 @@ impl GitRepository for RealGitRepository {
                 cmd.arg("--author").arg(&format!("{name} <{email}>"));
             }
 
-            run_git_command(env, ask_pass, cmd, executor).await?;
+            run_git_command(env, ask_pass, cmd, executor, false).await?;
 
             Ok(())
         }
@@ -2852,7 +2852,7 @@ impl GitRepository for RealGitRepository {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
 
-            run_git_command(env, ask_pass, command, executor).await
+            run_git_command(env, ask_pass, command, executor, true).await
         }
         .boxed()
     }
@@ -2895,7 +2895,7 @@ impl GitRepository for RealGitRepository {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
 
-            run_git_command(env, ask_pass, command, executor).await
+            run_git_command(env, ask_pass, command, executor, false).await
         }
         .boxed()
     }
@@ -2930,7 +2930,7 @@ impl GitRepository for RealGitRepository {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
 
-            run_git_command(env, ask_pass, command, executor).await
+            run_git_command(env, ask_pass, command, executor, false).await
         }
         .boxed()
     }
@@ -4039,10 +4039,13 @@ async fn run_git_command(
     ask_pass: AskPassDelegate,
     mut command: util::command::Command,
     executor: BackgroundExecutor,
+    is_push: bool,
 ) -> Result<RemoteCommandOutput> {
     // Credentials injected by the application (e.g. OTHCloud's GitHub token).
     // Config entries are appended after any `GIT_CONFIG_COUNT` the command
     // environment already has, so user-provided entries are preserved.
+    // OTerminal: read-only credentials are left out of pushes, which then use
+    // the user's own git credentials (see `GitCredentialOverride::allows_push`).
     let mut extra_env: Vec<(String, String)> = Vec::new();
     if let Some(count) = env
         .get("GIT_CONFIG_COUNT")
@@ -4051,11 +4054,13 @@ async fn run_git_command(
     {
         extra_env.push(("GIT_CONFIG_COUNT".to_string(), count));
     }
-    extra_env.extend(crate::credential_override::git_credential_plain_env());
-    crate::credential_override::merge_git_config_env(
-        &mut extra_env,
-        &crate::credential_override::git_credential_config_entries(),
-    );
+    if crate::credential_override::git_credential_override_applies(is_push) {
+        extra_env.extend(crate::credential_override::git_credential_plain_env());
+        crate::credential_override::merge_git_config_env(
+            &mut extra_env,
+            &crate::credential_override::git_credential_config_entries(),
+        );
+    }
 
     if env.contains_key("GIT_ASKPASS") {
         command.envs(extra_env);

@@ -27,6 +27,19 @@ pub trait GitCredentialOverride: Send + Sync {
     fn config_entries(&self) -> Vec<(String, String)> {
         Vec::new()
     }
+
+    /// Whether these credentials are used for `git push`. When not, pushes
+    /// run with the user's own git credentials instead (e.g. a GitHub App
+    /// installation token that can read repositories but not write them).
+    fn allows_push(&self) -> bool {
+        true
+    }
+
+    /// Who git authenticates as, for error messages ("octocat", "OTHCloud:
+    /// my-provider").
+    fn account_label(&self) -> Option<String> {
+        None
+    }
 }
 
 static OVERRIDE: RwLock<Option<Arc<dyn GitCredentialOverride>>> = RwLock::new(None);
@@ -54,6 +67,17 @@ pub fn github_api_token() -> Option<String> {
 
 fn current_override() -> Option<Arc<dyn GitCredentialOverride>> {
     OVERRIDE.read().clone()
+}
+
+/// Whether the current override applies to a git command; `is_push` for
+/// `git push`. False when no override is installed.
+pub fn git_credential_override_applies(is_push: bool) -> bool {
+    current_override().is_some_and(|o| !is_push || o.allows_push())
+}
+
+/// The account the current override authenticates as, if it has a label.
+pub fn git_credential_account_label() -> Option<String> {
+    current_override().and_then(|o| o.account_label())
 }
 
 /// The plain environment variables of the current override (no config entries).
@@ -125,6 +149,10 @@ pub struct GithubTokenCredentials {
     /// Hosts as URL prefixes, e.g. `https://github.com`.
     pub hosts: Vec<String>,
     pub token: String,
+    /// See [`GitCredentialOverride::allows_push`].
+    pub allows_push: bool,
+    /// See [`GitCredentialOverride::account_label`].
+    pub label: Option<String>,
 }
 
 impl GithubTokenCredentials {
@@ -132,6 +160,8 @@ impl GithubTokenCredentials {
         Self {
             hosts: vec!["https://github.com".to_string()],
             token,
+            allows_push: true,
+            label: None,
         }
     }
 }
@@ -165,6 +195,14 @@ impl GitCredentialOverride for GithubTokenCredentials {
             ));
         }
         entries
+    }
+
+    fn allows_push(&self) -> bool {
+        self.allows_push
+    }
+
+    fn account_label(&self) -> Option<String> {
+        self.label.clone()
     }
 }
 
@@ -264,6 +302,8 @@ mod tests {
                 "https://ghe.example.com".to_string(),
             ],
             token: "ghp_s3cr3tvalue".into(),
+            allows_push: true,
+            label: None,
         };
         let entries = credentials.config_entries();
         assert_eq!(
@@ -328,5 +368,22 @@ mod tests {
             get(&format!("GIT_CONFIG_VALUE_{base}")).as_deref(),
             Some("")
         );
+
+        // Read-only credentials (a GitHub App installation token) are used for
+        // fetches and clones but never for pushes. Kept in this test because the
+        // override is process-global and tests run in parallel.
+        assert!(!git_credential_override_applies(false));
+        set_git_credential_override(Some(Arc::new(GithubTokenCredentials {
+            allows_push: false,
+            label: Some("OTHCloud: my-app".into()),
+            ..GithubTokenCredentials::github("installation".into())
+        })));
+        let applies_to_fetch = git_credential_override_applies(false);
+        let applies_to_push = git_credential_override_applies(true);
+        let label = git_credential_account_label();
+        set_git_credential_override(None);
+        assert!(applies_to_fetch);
+        assert!(!applies_to_push);
+        assert_eq!(label.as_deref(), Some("OTHCloud: my-app"));
     }
 }
