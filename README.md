@@ -1,48 +1,79 @@
-# Zed
+<p align="center">
+  <img src="assets/images/oterminal_logo.png" alt="OTerminal" width="96" height="96">
+</p>
 
-[![Zed](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zed-industries/zed/main/assets/badge/v0.json)](https://zed.dev)
-[![CI](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml/badge.svg)](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml)
+<h1 align="center">OTerminal</h1>
 
-Welcome to Zed, a high-performance, multiplayer code editor from the creators of [Atom](https://github.com/atom/atom) and [Tree-sitter](https://github.com/tree-sitter/tree-sitter).
+<p align="center">
+  A fast, light terminal and code editor for <a href="https://othcloud.xyz">OTHCloud</a>.<br>
+  A fork of <a href="https://github.com/zed-industries/zed">Zed</a>, written in Rust.
+</p>
+
+<p align="center">
+  <a href="https://github.com/OverTimeHosting/OTerminal-Rust/releases/latest">Download</a> ·
+  <a href="./RELEASING.md">Releases &amp; updates</a> ·
+  <a href="https://othcloud.xyz">OTHCloud</a>
+</p>
 
 ---
 
-### Installation
+## What it is
 
-On macOS, Linux, and Windows you can [download Zed directly](https://zed.dev/download) or install Zed via your local package manager ([macOS](https://zed.dev/docs/installation#macos)/[Linux](https://zed.dev/docs/linux#installing-via-a-package-manager)/[Windows](https://zed.dev/docs/windows#package-managers)).
+OTerminal is [Zed](https://zed.dev) reshaped around the terminal and OTHCloud:
 
-Other platforms are not yet available:
+- **OTHCloud built in**: sign in once, then see your services, dev environments and game servers in the OTHCloud panel, and pull your terminal profiles.
+- **Claude Code**: Claude Code runs in its own panel and in tabs using your own Claude Code login, with task titles, a thread dropdown, notifications, and an **Agents dashboard** that shows every session, its sub-agents and background commands.
+- **Project tabs**: several projects in one window. A project you switch away from keeps its terminals, unsaved edits and layout, and its extra windows hide and come back as they were.
+- **Git & GitHub**: clone from your GitHub accounts (from OTHCloud or stored on this PC), switch accounts, branches and worktrees from the title bar.
+- **Light by default**: no telemetry, no collaboration or Zed AI extras, the OTHCloud look (JetBrains Mono, OTHCloud Dark/Light).
+- **Updates itself** from this repository's GitHub releases.
 
-- Web ([tracking discussion](https://github.com/zed-industries/zed/discussions/26195))
+OTerminal 2.x is the Rust line. The earlier VS Code-based OTerminal (1.x) lives in [OverTimeHosting/Oterminal](https://github.com/OverTimeHosting/Oterminal).
 
-### Developing Zed
+## Install
 
-- [Building Zed for macOS](./docs/src/development/macos.md)
-- [Building Zed for Linux](./docs/src/development/linux.md)
-- [Building Zed for Windows](./docs/src/development/windows.md)
+Download `OTerminal-<version>-windows-x86_64-setup.exe` from the [latest release](https://github.com/OverTimeHosting/OTerminal-Rust/releases/latest) and run it. After that, OTerminal updates itself: it checks for new releases at startup and every few hours and shows **Restart to Update** in the title bar.
 
-### Contributing
+The installer isn't code-signed yet, so Windows SmartScreen may warn on the first install ("More info" → "Run anyway").
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for ways you can contribute to Zed.
+Windows x64 only for now; macOS and Linux builds are planned.
 
-Also... we're hiring! Check out our [jobs](https://zed.dev/jobs) page for open roles.
+## Build from source (Windows)
 
-### Licensing
+Requirements: [rustup](https://rustup.rs) (the toolchain in `rust-toolchain.toml` is installed automatically), Visual Studio 2022 Build Tools with the C++ workload and a Windows 10/11 SDK, CMake, and Git.
 
-Zed source code is licensed primarily under GPL-3.0-or-later, with Apache-2.0 components where marked.
+```powershell
+git clone https://github.com/OverTimeHosting/OTerminal-Rust.git
+cd OTerminal-Rust
+cargo run -p zed                 # debug build, starts target\debug\oterminal.exe
+cargo build --release -p zed -p cli
+powershell -File script/bundle-windows.ps1   # installer
+```
 
-License information for third party dependencies must be correctly provided for CI to pass.
+Zed's own build guides still apply for the details: [Windows](./docs/src/development/windows.md), [macOS](./docs/src/development/macos.md), [Linux](./docs/src/development/linux.md).
 
-We use [`cargo-about`](https://github.com/EmbarkStudios/cargo-about) to automatically comply with open source licenses. If CI is failing, check the following:
+## Releases
 
-- Is it showing a `no license specified` error for a crate you've created? If so, add `publish = false` under `[package]` in your crate's Cargo.toml.
-- Is the error `failed to satisfy license requirements` for a dependency? If so, first determine what license the project has and whether this system is sufficient to comply with this license's requirements. If you're unsure, ask a lawyer. Once you've verified that this system is acceptable add the license's SPDX identifier to the `accepted` array in `script/licenses/zed-licenses.toml`.
-- Is `cargo-about` unable to find the license for a dependency? If so, add a clarification field at the end of `script/licenses/zed-licenses.toml`, as specified in the [cargo-about book](https://embarkstudios.github.io/cargo-about/cli/generate/config.html#crate-configuration).
+Every push to `main` bumps the version in `OTERMINAL_VERSION`, builds the Windows installer and publishes a GitHub release. See [RELEASING.md](./RELEASING.md) for how it works, the self-hosted runner option and the updater.
 
-## Sponsorship
+## Where things live
 
-Zed is developed by **Zed Industries, Inc.**, a for-profit company.
+| Area | Code |
+| --- | --- |
+| OTHCloud API, sign-in, deep link | `crates/othcloud_client` |
+| OTHCloud panel | `crates/othcloud_panel` |
+| GitHub accounts, clone, git credentials | `crates/othcloud_github`, `crates/git/src/credential_override.rs` |
+| Terminal profiles, Claude Code sessions | `crates/othcloud_terminal_profiles` |
+| Project tabs and project windows | `crates/project_tabs`, `crates/workspace/src/multi_workspace.rs` |
+| Claude Code panel, tabs, titles | `crates/agent_ui` |
+| Agents dashboard | `crates/agents_dashboard` |
+| Updater | `crates/auto_update` |
+| Theme and logo | `assets/themes/othcloud`, `assets/images` |
 
-If you’d like to financially support the project, you can do so via GitHub Sponsors.
-Sponsorships go directly to Zed Industries and are used as general company revenue.
-There are no perks or entitlements associated with sponsorship.
+## License
+
+OTerminal is a fork of [Zed](https://github.com/zed-industries/zed) by Zed Industries. Like Zed, its source code is licensed primarily under **GPL-3.0-or-later** ([LICENSE-GPL](./LICENSE-GPL)), with Apache-2.0 components where marked ([LICENSE-APACHE](./LICENSE-APACHE)). OTerminal's changes are released under the same terms.
+
+"Zed" is a trademark of Zed Industries; OTerminal is not affiliated with or endorsed by Zed Industries.
+
+Third-party dependency licenses are collected with [`cargo-about`](https://github.com/EmbarkStudios/cargo-about) (`script/licenses/zed-licenses.toml`). If that check fails for a crate you added, set `publish = false` under `[package]` in its `Cargo.toml`.
