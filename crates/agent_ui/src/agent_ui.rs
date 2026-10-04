@@ -236,6 +236,9 @@ actions!(
         RenameSelectedThread,
         /// Opens a new Claude Code thread as a tab in the center pane.
         NewClaudeTab,
+        /// Starts Claude Code Remote Control for this project in a terminal, so its
+        /// sessions can be used from claude.ai/code or the Claude mobile app.
+        StartClaudeRemoteControl,
         /// Moves the agent panel's current thread into a tab in the center pane.
         OpenThreadInTab,
         /// Moves the active Claude Code tab into a new window for the same project.
@@ -1220,6 +1223,10 @@ mod tests {
             assert!(
                 !filter.is_hidden(&NewThread),
                 "NewThread should stay visible in Claude Code only mode"
+            );
+            assert!(
+                !filter.is_hidden(&StartClaudeRemoteControl),
+                "StartClaudeRemoteControl should stay visible in Claude Code only mode"
             );
             assert!(
                 filter.is_hidden(&zed_actions::agent::OpenSettings),

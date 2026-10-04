@@ -60,7 +60,8 @@ actions!(
 /// Opens a new terminal in the terminal panel running the named terminal profile.
 ///
 /// Profiles come from runtime sources (such as OTHCloud), the `terminal.profiles`
-/// setting, and the built-in profiles (shells and "Claude Code").
+/// setting, and the built-in profiles (shells, "Claude Code" and "Claude Code
+/// Remote Control").
 #[derive(Clone, Debug, PartialEq, Deserialize, JsonSchema, Action)]
 #[action(namespace = terminal_panel)]
 #[serde(deny_unknown_fields)]
@@ -71,6 +72,9 @@ pub struct NewTerminalWithProfile {
 
 /// The name of the built-in Claude Code profile.
 pub const CLAUDE_CODE_PROFILE: &str = "Claude Code";
+
+/// The name of the built-in profile that runs `claude remote-control`.
+pub const CLAUDE_REMOTE_CONTROL_PROFILE: &str = "Claude Code Remote Control";
 
 /// Terminal profiles provided at runtime (e.g. synced from OTHCloud), grouped by
 /// section. Entries are `(section, name, profile)`. These are never written to
@@ -205,6 +209,15 @@ pub fn builtin_terminal_profiles() -> Vec<(String, TerminalProfile)> {
             ..Default::default()
         },
     ));
+    profiles.push((
+        CLAUDE_REMOTE_CONTROL_PROFILE.to_string(),
+        TerminalProfile {
+            program: Some("claude".to_string()),
+            args: vec!["remote-control".to_string()],
+            icon: Some("ai_claude".to_string()),
+            ..Default::default()
+        },
+    ));
 
     profiles
 }
@@ -220,6 +233,7 @@ const CLAUDE_NON_SESSION_SUBCOMMANDS: &[&str] = &[
     "migrate-installer",
     "setup-token",
     "plugin",
+    "remote-control",
 ];
 
 /// Whether `program` launches Claude Code (`claude`, `claude.exe`, `claude.cmd`, ...).
@@ -2327,9 +2341,33 @@ mod tests {
         apply_claude_launch_rules("claude", &mut args, [PathBuf::from("/a")]);
         assert_eq!(args, ["doctor"]);
 
+        let mut args = vec!["remote-control".to_string()];
+        apply_claude_launch_rules("claude", &mut args, [PathBuf::from("/a")]);
+        assert_eq!(args, ["remote-control"]);
+
         let mut args = Vec::new();
         apply_claude_launch_rules("pwsh", &mut args, [PathBuf::from("/a")]);
         assert!(args.is_empty());
+    }
+
+    #[gpui::test]
+    fn claude_remote_control_is_a_builtin_profile(cx: &mut TestAppContext) {
+        init_test(cx);
+        cx.update(|cx| {
+            let profile = resolve_profile(CLAUDE_REMOTE_CONTROL_PROFILE, cx);
+            assert_eq!(
+                profile.as_ref().and_then(|profile| profile.program.clone()),
+                Some("claude".to_string())
+            );
+            assert_eq!(
+                profile.map(|profile| profile.args),
+                Some(vec!["remote-control".to_string()])
+            );
+            assert!(
+                local_terminal_profile_names(cx)
+                    .contains(&CLAUDE_REMOTE_CONTROL_PROFILE.to_string())
+            );
+        });
     }
 
     #[gpui::test]

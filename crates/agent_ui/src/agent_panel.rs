@@ -6697,10 +6697,36 @@ impl AgentPanel {
                                             }),
                                     )
                                     .action("New Claude Code Tab", crate::NewClaudeTab.boxed_clone())
+                                    .action(
+                                        "Remote Control",
+                                        crate::StartClaudeRemoteControl.boxed_clone(),
+                                    )
                             }))
                         })
                         .into_any_element()
                 });
+            let remote_control_button = (can_create_entries
+                && DisableAiSettings::claude_code_only(cx))
+            .then(|| {
+                let tooltip_focus_handle = focus_handle.clone();
+                let focus_handle = focus_handle.clone();
+                IconButton::new("claude_code_remote_control_btn", IconName::SignalHigh)
+                    .icon_size(IconSize::Small)
+                    .tooltip(move |_window, cx| {
+                        Tooltip::for_action_in(
+                            "Remote Control",
+                            &crate::StartClaudeRemoteControl,
+                            &tooltip_focus_handle,
+                            cx,
+                        )
+                    })
+                    // Dispatched from the panel rather than the window's focused
+                    // element, so it reaches the workspace even when focus is
+                    // outside it.
+                    .on_click(move |_, window, cx| {
+                        focus_handle.dispatch_action(&crate::StartClaudeRemoteControl, window, cx);
+                    })
+            });
             let new_thread_menu = PopoverMenu::new("new_thread_menu")
                 .trigger_with_tooltip(
                     IconButton::new("new_thread_menu_btn", IconName::Plus)
@@ -6750,6 +6776,7 @@ impl AgentPanel {
                         .flex_none()
                         .gap_1()
                         .children(sandbox_status)
+                        .children(remote_control_button)
                         .when(
                             can_create_entries,
                             |this| match new_claude_code_thread_button {

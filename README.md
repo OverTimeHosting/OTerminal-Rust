@@ -1,3 +1,5 @@
+> [!IMPORTANT]
+> Remove this line to confirm you've reviewed this PR before submitting.
 <p align="center">
   <img src="assets/images/oterminal_logo.png" alt="OTerminal" width="96" height="96">
 </p>

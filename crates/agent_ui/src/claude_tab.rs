@@ -16,6 +16,9 @@ use gpui::{
     div,
 };
 use project::Project;
+use terminal_view::terminal_panel::{
+    CLAUDE_REMOTE_CONTROL_PROFILE, NewTerminalWithProfile, TerminalPanel,
+};
 use ui::{Icon, IconName, prelude::*};
 use util::ResultExt as _;
 use workspace::{
@@ -27,7 +30,7 @@ use workspace::{
 use crate::thread_metadata_store::{ThreadId, ThreadMetadataStore};
 use crate::{
     Agent, AgentConnectionStore, AgentInitialContent, AgentPanel, AgentThreadSource,
-    ConversationView, NewClaudeTab, OpenClaudeTabInNewWindow,
+    ConversationView, NewClaudeTab, OpenClaudeTabInNewWindow, StartClaudeRemoteControl,
 };
 
 const CLAUDE_TABS_NAMESPACE: &str = "claude_code_tabs";
@@ -44,6 +47,16 @@ pub fn init(cx: &mut App) {
             })
             .register_action(|workspace, _: &OpenClaudeTabInNewWindow, window, cx| {
                 ClaudeTab::move_active_tab_to_new_window(workspace, window, cx);
+            })
+            .register_action(|workspace, _: &StartClaudeRemoteControl, window, cx| {
+                TerminalPanel::new_terminal_with_profile(
+                    workspace,
+                    &NewTerminalWithProfile {
+                        profile: CLAUDE_REMOTE_CONTROL_PROFILE.to_string(),
+                    },
+                    window,
+                    cx,
+                );
             });
     })
     .detach();
