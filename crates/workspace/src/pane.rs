@@ -453,6 +453,9 @@ pub struct Pane {
     /// If a certain project item wants to get recreated with specific data, it can persist its data before the recreation here.
     pub project_item_restoration_data: HashMap<ProjectItemKind, Box<dyn Any + Send>>,
     welcome_page: Option<Entity<crate::welcome::WelcomePage>>,
+    /// OTerminal: the open right-click menu of this pane while it is empty,
+    /// and where it was opened.
+    empty_pane_menu: Option<(Entity<ContextMenu>, Point<Pixels>, Subscription)>,
 
     pub in_center_group: bool,
 }
@@ -625,6 +628,7 @@ impl Pane {
             diagnostic_summary_update: Task::ready(()),
             project_item_restoration_data: HashMap::default(),
             welcome_page: None,
+            empty_pane_menu: None,
             in_center_group: false,
         }
     }
@@ -833,6 +837,22 @@ impl Pane {
         F: 'static + Fn(&Window, &mut Context<Pane>) -> bool,
     {
         self.should_display_tab_bar = Rc::new(should_display_tab_bar);
+    }
+
+    fn deploy_empty_pane_menu(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let menu = empty_pane_menu(self.focus_handle.clone(), window, cx);
+        window.focus(&menu.focus_handle(cx), cx);
+        let subscription = cx.subscribe(&menu, |this, _, _: &gpui::DismissEvent, cx| {
+            this.empty_pane_menu = None;
+            cx.notify();
+        });
+        self.empty_pane_menu = Some((menu, position, subscription));
+        cx.notify();
     }
 
     pub fn set_should_display_welcome_page(&mut self, should_display_welcome_page: bool) {
@@ -4675,19 +4695,24 @@ impl Render for Pane {
                                 ));
                             // OTerminal: right-clicking an empty pane offers what
                             // can be opened in it.
-                            let focus_handle = self.focus_handle.clone();
-                            let menu_area =
-                                |content: Option<Entity<crate::welcome::WelcomePage>>| {
-                                    right_click_menu("empty-pane-menu")
-                                        .trigger(move |_, _, _| {
-                                            gpui::div().size_full().children(content)
-                                        })
-                                        .menu(move |window, cx| {
-                                            empty_pane_menu(focus_handle.clone(), window, cx)
-                                        })
-                                };
+                            let placeholder = placeholder
+                                .debug_selector(|| "EMPTY-PANE".into())
+                                .on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(
+                                        |this, event: &gpui::MouseDownEvent, window, cx| {
+                                            this.deploy_empty_pane_menu(event.position, window, cx);
+                                        },
+                                    ),
+                                )
+                                .children(self.empty_pane_menu.as_ref().map(
+                                    |(menu, position, _)| {
+                                        deferred(anchored().position(*position).child(menu.clone()))
+                                            .with_priority(1)
+                                    },
+                                ));
                             if has_worktrees || !self.should_display_welcome_page {
-                                placeholder.child(menu_area(None))
+                                placeholder
                             } else {
                                 if self.welcome_page.is_none() {
                                     let workspace = self.workspace.clone();
@@ -4697,7 +4722,7 @@ impl Render for Pane {
                                         )
                                     }));
                                 }
-                                placeholder.child(menu_area(self.welcome_page.clone()))
+                                placeholder.child(self.welcome_page.clone().unwrap())
                             }
                         }
                         .focus_follows_mouse(self.focus_follows_mouse, cx)
@@ -6868,6 +6893,38 @@ mod tests {
 
         // C should be at the beginning
         assert_item_labels(&pane_a, ["C*", "A", "B"], cx);
+    }
+
+    #[gpui::test]
+    async fn test_right_click_on_empty_pane_opens_menu(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+
+        let project = Project::test(fs, None, cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        cx.run_until_parked();
+
+        let empty_pane_bounds = cx
+            .debug_bounds("EMPTY-PANE")
+            .expect("an empty pane should render its placeholder");
+        assert!(empty_pane_bounds.size.width > px(0.) && empty_pane_bounds.size.height > px(0.));
+        pane.read_with(cx, |pane, _| assert!(pane.empty_pane_menu.is_none()));
+
+        cx.simulate_event(MouseDownEvent {
+            position: empty_pane_bounds.center(),
+            button: MouseButton::Right,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+            first_mouse: false,
+        });
+        cx.run_until_parked();
+        pane.read_with(cx, |pane, _| assert!(pane.empty_pane_menu.is_some()));
+
+        cx.dispatch_action(menu::Cancel);
+        cx.run_until_parked();
+        pane.read_with(cx, |pane, _| assert!(pane.empty_pane_menu.is_none()));
     }
 
     #[gpui::test]
