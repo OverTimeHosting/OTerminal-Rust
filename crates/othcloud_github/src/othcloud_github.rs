@@ -24,7 +24,6 @@ mod device_flow_modal;
 pub mod github_api;
 mod github_settings;
 pub mod local_accounts;
-mod status_item;
 mod token_modal;
 
 use std::{
@@ -57,7 +56,6 @@ pub use clone_picker::{CloneRepoModal, default_clone_directory};
 pub use device_flow_modal::GithubDeviceFlowModal;
 pub use github_settings::OthcloudGithubSettings;
 pub use local_accounts::{ActiveChoice, LocalGithubAccount, ResolvedAccount};
-pub use status_item::GithubStatusItem;
 pub use token_modal::GithubTokenModal;
 
 use github_api::GithubError;
