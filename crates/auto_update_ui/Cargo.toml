@@ -12,16 +12,11 @@ workspace = true
 path = "src/auto_update_ui.rs"
 
 [dependencies]
-agent_skills.workspace = true
 anyhow.workspace = true
 auto_update.workspace = true
-client.workspace = true
-db.workspace = true
 gpui.workspace = true
-prompt_store.workspace = true
 release_channel.workspace = true
 semver.workspace = true
-telemetry.workspace = true
 ui.workspace = true
 workspace.workspace = true
 zed_actions.workspace = true

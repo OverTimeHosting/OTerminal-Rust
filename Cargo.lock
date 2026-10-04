@@ -1437,16 +1437,11 @@ dependencies = [
 name = "auto_update_ui"
 version = "0.1.0"
 dependencies = [
- "agent_skills",
  "anyhow",
  "auto_update",
- "client",
- "db",
  "gpui",
- "prompt_store",
  "release_channel",
  "semver",
- "telemetry",
  "ui",
  "workspace",
  "zed_actions",
