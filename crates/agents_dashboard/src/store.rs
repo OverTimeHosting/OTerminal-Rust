@@ -17,8 +17,8 @@ use acp_thread::{
 use agent_ui::{AgentPanel, ConversationView, ThreadId, claude_tab::ClaudeTab};
 use collections::{HashMap, HashSet};
 use gpui::{
-    App, AppContext as _, Context, Entity, EntityId, EventEmitter, Global, ListOffset,
-    SharedString, Subscription, Task, WeakEntity, WindowHandle, px,
+    App, AppContext as _, Context, Entity, EntityId, EventEmitter, Focusable as _, Global,
+    ListOffset, SharedString, Subscription, Task, WeakEntity, WindowHandle, px,
 };
 use util::ResultExt as _;
 use workspace::{MultiWorkspace, Workspace};
@@ -371,7 +371,15 @@ impl AgentsStore {
         let Some(location) = resolve_locations(cx).remove(&entity_id) else {
             return;
         };
-        focus_location(location, entry_ix, cx);
+        focus_location(location, entry_ix, None, cx);
+    }
+
+    /// Focuses the thread and inserts `text` into its message editor.
+    pub fn insert_into_thread_message(entity_id: EntityId, text: String, cx: &mut App) {
+        let Some(location) = resolve_locations(cx).remove(&entity_id) else {
+            return;
+        };
+        focus_location(location, None, Some(text), cx);
     }
 
     pub fn thread(&self, entity_id: EntityId) -> Option<Entity<AcpThread>> {
@@ -768,7 +776,12 @@ fn resolve_locations(cx: &App) -> HashMap<EntityId, ThreadLocation> {
     locations
 }
 
-fn focus_location(location: ThreadLocation, entry_ix: Option<usize>, cx: &mut App) {
+fn focus_location(
+    location: ThreadLocation,
+    entry_ix: Option<usize>,
+    message_text: Option<String>,
+    cx: &mut App,
+) {
     let ThreadLocation {
         window,
         workspace,
@@ -806,6 +819,15 @@ fn focus_location(location: ThreadLocation, entry_ix: Option<usize>, cx: &mut Ap
                     });
                     cx.notify();
                 });
+            }
+            if let Some(text) = message_text
+                && let Some(thread_view) = conversation_view.read(cx).root_thread_view()
+            {
+                let message_editor = thread_view.read(cx).message_editor.clone();
+                message_editor.update(cx, |message_editor, cx| {
+                    message_editor.insert_text(&text, window, cx);
+                });
+                message_editor.focus_handle(cx).focus(window, cx);
             }
         })
         .log_err();

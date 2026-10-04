@@ -5,10 +5,11 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
 use collections::{HashMap, HashSet};
+use editor::{Editor, MultiBufferOffset, actions::MoveToEnd};
 use gpui::{
-    AnyElement, App, ClickEvent, Context, ElementId, Entity, EntityId, EventEmitter, FocusHandle,
-    Focusable, IntoElement, ParentElement, Render, ScrollHandle, SharedString, Styled,
-    Subscription, Task, WeakEntity, Window, div, px,
+    AnyElement, App, ClickEvent, ClipboardItem, Context, ElementId, Entity, EntityId, EventEmitter,
+    FocusHandle, Focusable, IntoElement, ParentElement, Render, ScrollHandle, SharedString, Styled,
+    Subscription, Task, TextStyleRefinement, WeakEntity, Window, div, px,
 };
 use ui::{
     Chip, CommonAnimationExt as _, Disclosure, Icon, IconButton, IconName, Tooltip, prelude::*,
@@ -25,10 +26,18 @@ use crate::model::{
 use crate::store::{AgentsStore, LocationKind, ThreadSnapshot};
 
 const TICK: Duration = Duration::from_secs(1);
-const LOG_PREVIEW_MAX_HEIGHT: gpui::Pixels = px(280.);
-/// A log preview scrolled to within this distance of its end follows new
-/// output.
-const LOG_PREVIEW_FOLLOW_DISTANCE: gpui::Pixels = px(12.);
+const LOG_PREVIEW_MAX_LINES: usize = 16;
+
+/// An open log preview of a background item.
+struct LogPreview {
+    /// Read-only, so the output can be selected and copied.
+    editor: Entity<Editor>,
+    /// The output `editor` shows.
+    text: Option<SharedString>,
+    /// New output is held back while the user works in `editor`, so their
+    /// selection and scroll position survive.
+    paused: bool,
+}
 
 pub struct AgentsDashboard {
     store: Entity<AgentsStore>,
@@ -38,7 +47,7 @@ pub struct AgentsDashboard {
     collapsed: HashSet<(EntityId, SharedString)>,
     show_inactive: bool,
     /// Open log previews of background items, keyed by thread and call id.
-    log_previews: HashMap<(EntityId, SharedString), ScrollHandle>,
+    log_previews: HashMap<(EntityId, SharedString), LogPreview>,
     scroll_handle: ScrollHandle,
     ticker: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -65,7 +74,6 @@ impl AgentsDashboard {
         cx: &mut Context<Self>,
     ) -> Self {
         let subscriptions = vec![cx.observe(&store, |this, _, cx| {
-            this.follow_log_previews();
             this.update_ticker(cx);
             cx.notify();
         })];
@@ -124,13 +132,36 @@ impl AgentsDashboard {
         &mut self,
         key: (EntityId, SharedString),
         output_path: Option<PathBuf>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let previewed = self.log_previews.remove(&key).is_none();
         if previewed {
-            let scroll_handle = ScrollHandle::new();
-            scroll_handle.scroll_to_bottom();
-            self.log_previews.insert(key, scroll_handle);
+            let editor = cx.new(|cx| {
+                let mut editor = Editor::auto_height(1, LOG_PREVIEW_MAX_LINES, window, cx);
+                editor.set_read_only(true);
+                editor.set_show_gutter(false, cx);
+                editor.set_placeholder_text("No output yet", window, cx);
+                editor.set_text_style_refinement(TextStyleRefinement {
+                    font_family: Some(theme::theme_settings(cx).buffer_font(cx).family.clone()),
+                    font_size: Some(
+                        TextSize::XSmall
+                            .rems(cx)
+                            .to_pixels(window.rem_size())
+                            .into(),
+                    ),
+                    ..Default::default()
+                });
+                editor
+            });
+            self.log_previews.insert(
+                key,
+                LogPreview {
+                    editor,
+                    text: None,
+                    paused: false,
+                },
+            );
         }
         if let Some(path) = output_path {
             self.store.update(cx, |store, cx| {
@@ -140,15 +171,82 @@ impl AgentsDashboard {
         cx.notify();
     }
 
-    /// Keeps the log previews that show the end of their output there when
-    /// more arrives. One the user scrolled up in stays where it is.
-    fn follow_log_previews(&self) {
-        for scroll_handle in self.log_previews.values() {
-            let distance_from_end = scroll_handle.max_offset().y + scroll_handle.offset().y;
-            if distance_from_end <= LOG_PREVIEW_FOLLOW_DISTANCE {
-                scroll_handle.scroll_to_bottom();
+    /// Shows the newest output in the open log previews and scrolls them to
+    /// its end, except in one the user is working in.
+    fn sync_log_previews(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.log_previews.is_empty() {
+            return;
+        }
+        let mut outputs = HashMap::default();
+        for snapshot in self.store.read(cx).snapshots() {
+            for item in &snapshot.background {
+                let key = (snapshot.entity_id, item.call_id.clone());
+                if self.log_previews.contains_key(&key) {
+                    outputs.insert(key, item.output.clone());
+                }
             }
         }
+        for (key, preview) in &mut self.log_previews {
+            let Some(output) = outputs.remove(key) else {
+                continue;
+            };
+            preview.paused = preview.text != output
+                && preview.editor.focus_handle(cx).contains_focused(window, cx);
+            if preview.text == output || preview.paused {
+                continue;
+            }
+            preview.editor.update(cx, |editor, cx| {
+                editor.set_text(output.as_deref().unwrap_or_default(), window, cx);
+                editor.move_to_end(&MoveToEnd, window, cx);
+            });
+            preview.text = output;
+        }
+    }
+
+    /// The text selected in a log preview, or all of it without a selection.
+    fn log_preview_text(preview: &LogPreview, cx: &mut App) -> Option<String> {
+        let selected = preview.editor.update(cx, |editor, cx| {
+            let snapshot = editor.display_snapshot(cx);
+            let selection = editor.selections.newest::<MultiBufferOffset>(&snapshot);
+            snapshot
+                .buffer_snapshot()
+                .text_for_range(selection.start..selection.end)
+                .collect::<String>()
+        });
+        if selected.trim().is_empty() {
+            preview.text.as_ref().map(|text| text.to_string())
+        } else {
+            Some(selected)
+        }
+    }
+
+    /// Puts the selected part of a log preview (or all of it) into the
+    /// message editor of the thread that started the command.
+    fn send_log_to_thread(
+        &mut self,
+        key: &(EntityId, SharedString),
+        command: &str,
+        output_path: Option<&PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(text) = self
+            .log_previews
+            .get(key)
+            .and_then(|preview| Self::log_preview_text(preview, cx))
+        else {
+            return;
+        };
+        let full_log = output_path
+            .map(|path| format!(" (full log: {})", path.display()))
+            .unwrap_or_default();
+        let message = format!(
+            "Output of the background command `{}`{full_log}:\n```\n{text}\n```\n",
+            first_line(command)
+        );
+        let thread = key.0;
+        // Activating the thread updates the window and workspace this is
+        // called from.
+        cx.defer(move |cx| AgentsStore::insert_into_thread_message(thread, message, cx));
     }
 
     fn render_header(
@@ -690,50 +788,96 @@ impl AgentsDashboard {
         let store = self.store.clone();
 
         let preview_key = (thread, item.call_id.clone());
-        let preview_scroll_handle = self.log_previews.get(&preview_key).cloned();
+        let open_preview = self.log_previews.get(&preview_key);
         let has_preview = item.output_path.is_some() || item.kind == BackgroundKind::Terminal;
         let preview_toggle = has_preview.then(|| {
+            let preview_key = preview_key.clone();
             let output_path = item.output_path.clone();
             IconButton::new(
                 ElementId::Name(format!("bg-preview-{element_key}").into()),
                 IconName::ToolTerminal,
             )
             .icon_size(IconSize::XSmall)
-            .toggle_state(preview_scroll_handle.is_some())
-            .tooltip(Tooltip::text(if preview_scroll_handle.is_some() {
+            .toggle_state(open_preview.is_some())
+            .tooltip(Tooltip::text(if open_preview.is_some() {
                 "Hide output"
             } else {
                 "Preview output"
             }))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.toggle_log_preview(preview_key.clone(), output_path.clone(), cx);
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.toggle_log_preview(preview_key.clone(), output_path.clone(), window, cx);
             }))
         });
-        let preview = preview_scroll_handle.map(|scroll_handle| {
-            let (text, color) = match &item.output {
-                Some(output) => (output.clone(), Color::Default),
-                None => ("No output yet".into(), Color::Muted),
-            };
-            div()
-                .id(ElementId::Name(format!("bg-log-{element_key}").into()))
-                .ml(px(22.))
-                .mr_1()
-                .mb_1()
-                .p_1p5()
-                .max_h(LOG_PREVIEW_MAX_HEIGHT)
-                .overflow_y_scroll()
-                .track_scroll(&scroll_handle)
-                .rounded_sm()
-                .border_1()
+        let preview =
+            open_preview.map(|preview| {
+                let copy_text = preview.text.clone();
+                let command = item.command.clone();
+                let output_path = item.output_path.clone();
+                let header = h_flex()
+                .px_1p5()
+                .gap_1()
+                .justify_between()
+                .border_b_1()
                 .border_color(colors.border_variant)
-                .bg(colors.editor_background)
                 .child(
-                    Label::new(text)
-                        .size(LabelSize::XSmall)
-                        .color(color)
-                        .buffer_font(cx),
+                    Label::new(if preview.paused {
+                        "Paused while you select \u{b7} click outside to resume"
+                    } else {
+                        "Last lines of output"
+                    })
+                    .size(LabelSize::XSmall)
+                    .color(Color::Muted),
                 )
-        });
+                .child(
+                    h_flex()
+                        .gap_0p5()
+                        .child(
+                            Button::new(
+                                ElementId::Name(format!("bg-log-send-{element_key}").into()),
+                                "Send to Claude",
+                            )
+                            .label_size(LabelSize::XSmall)
+                            .style(ButtonStyle::Subtle)
+                            .tooltip(Tooltip::text(
+                                "Add the selected lines (or all of them) to this thread's message",
+                            ))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.send_log_to_thread(
+                                    &preview_key,
+                                    &command,
+                                    output_path.as_ref(),
+                                    cx,
+                                );
+                            })),
+                        )
+                        .child(
+                            IconButton::new(
+                                ElementId::Name(format!("bg-log-copy-{element_key}").into()),
+                                IconName::Copy,
+                            )
+                            .icon_size(IconSize::XSmall)
+                            .disabled(copy_text.is_none())
+                            .tooltip(Tooltip::text("Copy all"))
+                            .on_click(move |_, _, cx| {
+                                if let Some(text) = &copy_text {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(
+                                        text.to_string(),
+                                    ));
+                                }
+                            }),
+                        ),
+                );
+                v_flex()
+                    .ml(px(22.))
+                    .mr_1()
+                    .mb_1()
+                    .rounded_sm()
+                    .border_1()
+                    .border_color(colors.border_variant)
+                    .bg(colors.editor_background)
+                    .child(header)
+                    .child(div().p_1p5().child(preview.editor.clone()))
+            });
 
         let actions = h_flex()
             .flex_none()
@@ -963,7 +1107,8 @@ fn node_status_icon(status: NodeStatus, key: String) -> AnyElement {
 }
 
 impl Render for AgentsDashboard {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sync_log_previews(window, cx);
         let now = Instant::now();
         let show_inactive = self.show_inactive;
         let mut snapshots: Vec<ThreadSnapshot> = self
