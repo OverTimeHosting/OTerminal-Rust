@@ -1187,8 +1187,10 @@ impl Panel for OthcloudPanel {
         px(300.)
     }
 
+    /// No dock button: the status bar's OTHCloud item already toggles the
+    /// panel.
     fn icon(&self, _: &Window, _: &App) -> Option<IconName> {
-        Some(IconName::Othcloud)
+        None
     }
 
     fn icon_tooltip(&self, _: &Window, _: &App) -> Option<&'static str> {
