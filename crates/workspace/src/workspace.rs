@@ -12673,13 +12673,13 @@ mod tests {
                     .map(|e| e.id)
             );
         });
-        assert_eq!(cx.window_title().as_deref(), Some("root1 — one.txt"));
+        assert_eq!(cx.window_title().as_deref(), Some("OTerminal — root1 — one.txt"));
 
         // Add a second item to a non-empty pane
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.add_item_to_active_pane(Box::new(item2), None, true, window, cx)
         });
-        assert_eq!(cx.window_title().as_deref(), Some("root1 — two.txt"));
+        assert_eq!(cx.window_title().as_deref(), Some("OTerminal — root1 — two.txt"));
         project.update(cx, |project, cx| {
             assert_eq!(
                 project.active_entry(),
@@ -12695,7 +12695,7 @@ mod tests {
         })
         .await
         .unwrap();
-        assert_eq!(cx.window_title().as_deref(), Some("root1 — one.txt"));
+        assert_eq!(cx.window_title().as_deref(), Some("OTerminal — root1 — one.txt"));
         project.update(cx, |project, cx| {
             assert_eq!(
                 project.active_entry(),
@@ -12712,11 +12712,11 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(cx.window_title().as_deref(), Some("root1, root2 — one.txt"));
+        assert_eq!(cx.window_title().as_deref(), Some("OTerminal — root1, root2 — one.txt"));
 
         // Remove a project folder
         project.update(cx, |project, cx| project.remove_worktree(worktree_id, cx));
-        assert_eq!(cx.window_title().as_deref(), Some("root2 — one.txt"));
+        assert_eq!(cx.window_title().as_deref(), Some("OTerminal — root2 — one.txt"));
     }
 
     #[gpui::test]
@@ -12815,7 +12815,7 @@ mod tests {
         workspace.update_in(cx, |workspace, window, cx| {
             workspace.add_item_to_active_pane(Box::new(item), None, true, window, cx)
         });
-        assert_eq!(cx.window_title().as_deref(), Some("root1 — one.txt"));
+        assert_eq!(cx.window_title().as_deref(), Some("OTerminal — root1 — one.txt"));
 
         cx.update(|_, cx| {
             SettingsStore::update_global(cx, |settings, cx| {
@@ -12882,7 +12882,7 @@ mod tests {
             });
         });
         cx.executor().run_until_parked();
-        assert_eq!(cx.window_title().as_deref(), Some("root1 | one.txt"));
+        assert_eq!(cx.window_title().as_deref(), Some("OTerminal | root1 | one.txt"));
 
         cx.update(|_, cx| {
             SettingsStore::update_global(cx, |settings, cx| {
@@ -12892,7 +12892,7 @@ mod tests {
             });
         });
         cx.executor().run_until_parked();
-        assert_eq!(cx.window_title().as_deref(), Some("root1 | one.txt"));
+        assert_eq!(cx.window_title().as_deref(), Some("OTerminal | root1 | one.txt"));
 
         cx.update(|_, cx| {
             SettingsStore::update_global(cx, |settings, cx| {
@@ -12902,7 +12902,7 @@ mod tests {
             });
         });
         cx.executor().run_until_parked();
-        assert_eq!(cx.window_title().as_deref(), Some("root1 | one.txt"));
+        assert_eq!(cx.window_title().as_deref(), Some("OTerminal | root1 | one.txt"));
     }
 
     #[gpui::test]
@@ -12936,7 +12936,7 @@ mod tests {
             });
         });
         cx.executor().run_until_parked();
-        assert_eq!(cx.window_title().as_deref(), Some("Zed — root1, root2"));
+        assert_eq!(cx.window_title().as_deref(), Some("OTerminal — root1, root2"));
 
         let item = cx.new(|cx| {
             TestItem::new(cx).with_project_items(&[TestProjectItem::new_in_worktree(
@@ -12953,7 +12953,7 @@ mod tests {
         let expected_file_path = path!("/root1/src/one.txt");
         assert_eq!(
             cx.window_title().as_deref(),
-            Some(format!("Zed — root1, root2 — one — {expected_file_path}").as_str())
+            Some(format!("OTerminal — root1, root2 — one — {expected_file_path}").as_str())
         );
     }
 
@@ -12974,7 +12974,7 @@ mod tests {
             });
         });
         cx.executor().run_until_parked();
-        assert_eq!(cx.window_title().as_deref(), Some("empty project"));
+        assert_eq!(cx.window_title().as_deref(), Some("OTerminal — empty project"));
     }
 
     #[gpui::test]
@@ -19015,7 +19015,7 @@ mod tests {
 
         let cx = &mut VisualTestContext::from_window(multi_workspace_handle.into(), cx);
         cx.run_until_parked();
-        assert_eq!(cx.window_title().as_deref(), Some("root1"));
+        assert_eq!(cx.window_title().as_deref(), Some("OTerminal — root1"));
 
         // Activating a second workspace must update the shared window's title.
         multi_workspace_handle
@@ -19024,7 +19024,7 @@ mod tests {
             })
             .unwrap();
         cx.run_until_parked();
-        assert_eq!(cx.window_title().as_deref(), Some("root2"));
+        assert_eq!(cx.window_title().as_deref(), Some("OTerminal — root2"));
 
         // Switching back must update the title again, even though workspace A's
         // own computed title hasn't changed since it was last active. This is
@@ -19036,7 +19036,7 @@ mod tests {
             })
             .unwrap();
         cx.run_until_parked();
-        assert_eq!(cx.window_title().as_deref(), Some("root1"));
+        assert_eq!(cx.window_title().as_deref(), Some("OTerminal — root1"));
     }
 
     #[gpui::test]
@@ -19058,7 +19058,7 @@ mod tests {
 
         let cx = &mut VisualTestContext::from_window(multi_workspace_handle.into(), cx);
         cx.run_until_parked();
-        assert_eq!(cx.window_title().as_deref(), Some("root1"));
+        assert_eq!(cx.window_title().as_deref(), Some("OTerminal — root1"));
 
         // Switch to workspace B; workspace A becomes a background workspace whose
         // event subscriptions are still live.
@@ -19068,7 +19068,7 @@ mod tests {
             })
             .unwrap();
         cx.run_until_parked();
-        assert_eq!(cx.window_title().as_deref(), Some("root2"));
+        assert_eq!(cx.window_title().as_deref(), Some("OTerminal — root2"));
 
         // A title-affecting change in the background workspace A must not touch
         // the shared window's title, which belongs to the active workspace B.
@@ -19079,7 +19079,7 @@ mod tests {
             .await
             .unwrap();
         cx.run_until_parked();
-        assert_eq!(cx.window_title().as_deref(), Some("root2"));
+        assert_eq!(cx.window_title().as_deref(), Some("OTerminal — root2"));
     }
 
     fn pane_items_paths(pane: &Entity<Pane>, cx: &App) -> Vec<String> {

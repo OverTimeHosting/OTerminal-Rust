@@ -4343,16 +4343,16 @@ fn default_render_tab_bar_buttons(
                             menu.action("New Claude Code Tab", action).separator()
                         })
                         .action("New File", NewFile.boxed_clone())
-                            .action("Open File", ToggleFileFinder::default().boxed_clone())
-                            .separator()
-                            .action("Search Project", DeploySearch::default().boxed_clone())
-                            .action("Search Symbols", ToggleProjectSymbols.boxed_clone())
-                            .separator()
-                            .action("New Terminal", NewTerminal::default().boxed_clone())
-                            .action(
-                                "New Center Terminal",
-                                NewCenterTerminal::default().boxed_clone(),
-                            )
+                        .action("Open File", ToggleFileFinder::default().boxed_clone())
+                        .separator()
+                        .action("Search Project", DeploySearch::default().boxed_clone())
+                        .action("Search Symbols", ToggleProjectSymbols.boxed_clone())
+                        .separator()
+                        .action("New Terminal", NewTerminal::default().boxed_clone())
+                        .action(
+                            "New Center Terminal",
+                            NewCenterTerminal::default().boxed_clone(),
+                        )
                     }))
                 }),
         )
@@ -4404,6 +4404,42 @@ fn default_render_tab_bar_buttons(
         .into_any_element()
         .into();
     (None, right_children)
+}
+
+/// OTerminal: the right-click menu of an empty pane. The actions run in that
+/// pane (`focus_handle`) rather than the focused one.
+fn empty_pane_menu(
+    focus_handle: FocusHandle,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<ContextMenu> {
+    // Claude Code's actions are looked up by name since workspace can't
+    // depend on agent_ui.
+    let new_claude_tab = cx.build_action("agent::NewClaudeTab", None).ok();
+    let claude_remote_control = cx
+        .build_action("agent::StartClaudeRemoteControl", None)
+        .ok();
+    ContextMenu::build(window, cx, |menu, _, _| {
+        menu.context(focus_handle)
+            .when_some(new_claude_tab, |menu, action| {
+                menu.action("New Claude Code Tab", action)
+            })
+            .when_some(claude_remote_control, |menu, action| {
+                menu.action("Claude Code Remote Control", action)
+            })
+            .separator()
+            .action("New Terminal", NewTerminal::default().boxed_clone())
+            .action(
+                "New Center Terminal",
+                NewCenterTerminal::default().boxed_clone(),
+            )
+            .separator()
+            .action("New File", NewFile.boxed_clone())
+            .action("Open File", ToggleFileFinder::default().boxed_clone())
+            .action("Open Folder", crate::Open::default().boxed_clone())
+            .separator()
+            .action("Search Project", DeploySearch::default().boxed_clone())
+    })
 }
 
 impl Focusable for Pane {
@@ -4637,8 +4673,21 @@ impl Render for Pane {
                                         }
                                     },
                                 ));
+                            // OTerminal: right-clicking an empty pane offers what
+                            // can be opened in it.
+                            let focus_handle = self.focus_handle.clone();
+                            let menu_area =
+                                |content: Option<Entity<crate::welcome::WelcomePage>>| {
+                                    right_click_menu("empty-pane-menu")
+                                        .trigger(move |_, _, _| {
+                                            gpui::div().size_full().children(content)
+                                        })
+                                        .menu(move |window, cx| {
+                                            empty_pane_menu(focus_handle.clone(), window, cx)
+                                        })
+                                };
                             if has_worktrees || !self.should_display_welcome_page {
-                                placeholder
+                                placeholder.child(menu_area(None))
                             } else {
                                 if self.welcome_page.is_none() {
                                     let workspace = self.workspace.clone();
@@ -4648,7 +4697,7 @@ impl Render for Pane {
                                         )
                                     }));
                                 }
-                                placeholder.child(self.welcome_page.clone().unwrap())
+                                placeholder.child(menu_area(self.welcome_page.clone()))
                             }
                         }
                         .focus_follows_mouse(self.focus_follows_mouse, cx)

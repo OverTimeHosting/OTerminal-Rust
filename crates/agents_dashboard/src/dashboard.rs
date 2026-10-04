@@ -12,7 +12,8 @@ use gpui::{
     Subscription, Task, TextStyleRefinement, WeakEntity, Window, div, px,
 };
 use ui::{
-    Chip, CommonAnimationExt as _, Disclosure, Icon, IconButton, IconName, Tooltip, prelude::*,
+    Chip, CommonAnimationExt as _, ContextMenu, Disclosure, Icon, IconButton, IconName, Tooltip,
+    prelude::*,
 };
 use workspace::{
     Item, OpenOptions, Workspace,
@@ -142,6 +143,18 @@ impl AgentsDashboard {
                 editor.set_read_only(true);
                 editor.set_show_gutter(false, cx);
                 editor.set_placeholder_text("No output yet", window, cx);
+                editor.set_custom_context_menu(|editor, _point, window, cx| {
+                    let has_selection =
+                        editor.has_non_empty_selection(&editor.display_snapshot(cx));
+                    Some(ContextMenu::build(window, cx, |menu, _, _| {
+                        menu.action_disabled_when(
+                            !has_selection,
+                            "Copy",
+                            Box::new(editor::actions::Copy),
+                        )
+                        .action("Select All", Box::new(editor::actions::SelectAll))
+                    }))
+                });
                 editor.set_text_style_refinement(TextStyleRefinement {
                     font_family: Some(theme::theme_settings(cx).buffer_font(cx).family.clone()),
                     font_size: Some(

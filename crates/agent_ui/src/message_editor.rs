@@ -499,6 +499,8 @@ impl MessageEditor {
                         )
                         .action("Paste", Box::new(editor::actions::Paste))
                         .action("Paste as Plain Text", Box::new(PasteRaw))
+                        .separator()
+                        .action("Select All", Box::new(editor::actions::SelectAll))
                 }))
             });
 

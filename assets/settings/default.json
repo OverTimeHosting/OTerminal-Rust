@@ -251,8 +251,8 @@
   // rendered template.
   // If the template renders to nothing, the default template is used instead.
   //
-  // Default: "${projectName}${separator}${fileName}"
-  "window_title_format": "${projectName}${separator}${fileName}",
+  // Default: "${appName}${separator}${projectName}${separator}${fileName}"
+  "window_title_format": "${appName}${separator}${projectName}${separator}${fileName}",
   // String substituted for ${separator} in the window title format.
   // Include any surrounding whitespace in the value.
   //
