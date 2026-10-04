@@ -1285,6 +1285,14 @@ impl ToolCall {
         })
     }
 
+    /// OTerminal: a sub-agent's own tool call (see `parent_tool_call_id`), which
+    /// the conversation leaves out so it shows what the main agent is doing. A
+    /// call waiting for permission is kept, because only the user can answer it.
+    pub fn is_hidden_sub_agent_call(&self) -> bool {
+        self.parent_tool_call_id.is_some()
+            && !matches!(self.status, ToolCallStatus::WaitingForConfirmation { .. })
+    }
+
     pub fn is_subagent(&self) -> bool {
         self.tool_name.as_ref().is_some_and(|s| s == "spawn_agent")
             || self.subagent_session_info.is_some()
@@ -7738,6 +7746,97 @@ mod tests {
                 panic!("resolved permission request should select an outcome")
             }
         }
+    }
+
+    #[gpui::test]
+    async fn test_sub_agent_tool_calls_are_hidden_unless_waiting_for_permission(
+        cx: &mut TestAppContext,
+    ) {
+        init_test(cx);
+
+        let fs = FakeFs::new(cx.executor());
+        let project = Project::test(fs, [], cx).await;
+        let connection = Rc::new(FakeAgentConnection::new());
+        let thread = cx
+            .update(|cx| {
+                connection.new_session(project, PathList::new(&[Path::new(path!("/test"))]), cx)
+            })
+            .await
+            .unwrap();
+
+        let agent_call_id = acp::ToolCallId::new("toolu_01agent");
+        let sub_agent_call_id = acp::ToolCallId::new("toolu_01sub_agent_read");
+        let sub_agent_meta = acp::Meta::from_iter([(
+            "claudeCode".into(),
+            serde_json::json!({ "parentToolUseId": agent_call_id.0.as_ref() }),
+        )]);
+        thread
+            .update(cx, |thread, cx| {
+                thread.handle_session_update(
+                    acp::SessionUpdate::ToolCall(
+                        acp::ToolCall::new(agent_call_id.clone(), "Explore the code")
+                            .kind(acp::ToolKind::Think)
+                            .status(acp::ToolCallStatus::InProgress),
+                    ),
+                    cx,
+                )?;
+                thread.handle_session_update(
+                    acp::SessionUpdate::ToolCall(
+                        acp::ToolCall::new(sub_agent_call_id.clone(), "Read file")
+                            .kind(acp::ToolKind::Read)
+                            .status(acp::ToolCallStatus::InProgress)
+                            .meta(sub_agent_meta),
+                    ),
+                    cx,
+                )
+            })
+            .unwrap();
+
+        let is_hidden = |thread: &AcpThread, id: &acp::ToolCallId| {
+            thread
+                .tool_call(id)
+                .map(|(_, tool_call)| tool_call.is_hidden_sub_agent_call())
+        };
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(is_hidden(thread, &agent_call_id), Some(false));
+            assert_eq!(is_hidden(thread, &sub_agent_call_id), Some(true));
+        });
+
+        let permission_task = thread
+            .update(cx, |thread, cx| {
+                thread.request_tool_call_authorization(
+                    acp::ToolCall::new(sub_agent_call_id.clone(), "Read file")
+                        .kind(acp::ToolKind::Read)
+                        .status(acp::ToolCallStatus::Pending)
+                        .into(),
+                    PermissionOptions::Flat(vec![acp::PermissionOption::new(
+                        acp::PermissionOptionId::new("allow"),
+                        "Allow",
+                        acp::PermissionOptionKind::AllowOnce,
+                    )]),
+                    AuthorizationKind::PermissionGrant,
+                    cx,
+                )
+            })
+            .unwrap();
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(is_hidden(thread, &sub_agent_call_id), Some(false));
+        });
+
+        thread.update(cx, |thread, cx| {
+            thread.authorize_tool_call(
+                sub_agent_call_id.clone(),
+                SelectedPermissionOutcome::new(
+                    acp::PermissionOptionId::new("allow"),
+                    acp::PermissionOptionKind::AllowOnce,
+                ),
+                cx,
+            );
+        });
+        permission_task.await;
+        thread.read_with(cx, |thread, _| {
+            assert_eq!(is_hidden(thread, &sub_agent_call_id), Some(true));
+        });
     }
 
     #[gpui::test]

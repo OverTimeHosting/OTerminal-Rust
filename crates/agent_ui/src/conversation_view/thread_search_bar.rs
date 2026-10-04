@@ -908,6 +908,7 @@ fn collect_markdowns(
                 }
             }
         }
+        AgentThreadEntry::ToolCall(tool_call) if tool_call.is_hidden_sub_agent_call() => {}
         AgentThreadEntry::ToolCall(tool_call) => {
             out.push(tool_call.label.clone());
             if entry_view_state.is_tool_call_expanded(&tool_call.id) {
