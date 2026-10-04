@@ -110,6 +110,8 @@ pub struct TerminalInfo {
     pub cwd: Option<SharedString>,
     pub started_at: Instant,
     pub last_line: Option<SharedString>,
+    /// The end of a running terminal's output, see [`output_preview`].
+    pub output: Option<SharedString>,
 }
 
 #[derive(Clone, Debug)]
@@ -726,6 +728,27 @@ pub fn strip_ansi(text: &str) -> String {
     ANSI.replace_all(text, "").into_owned()
 }
 
+/// How many lines of a background command's output the dashboard previews.
+pub const PREVIEW_LINES: usize = 200;
+
+/// The last [`PREVIEW_LINES`] lines of `text` as plain text: without ANSI
+/// escapes, and with a line rewritten in place by carriage returns (e.g. a
+/// progress bar) reduced to its final state.
+pub fn output_preview(text: &str) -> Option<SharedString> {
+    let lines = text
+        .lines()
+        .map(|line| {
+            let line = line.rsplit('\r').next().unwrap_or(line);
+            strip_ansi(line).trim_end().to_string()
+        })
+        .collect::<Vec<_>>();
+    let end = lines.iter().rposition(|line| !line.is_empty())? + 1;
+    let start = end.saturating_sub(PREVIEW_LINES);
+    let preview = lines.get(start..end)?;
+    let first = preview.iter().position(|line| !line.is_empty())?;
+    Some(preview.get(first..)?.join("\n").into())
+}
+
 /// The last non-empty line of `text`, without ANSI escapes.
 pub fn last_line(text: &str) -> Option<SharedString> {
     text.lines()
@@ -763,6 +786,8 @@ impl BackgroundStatus {
 /// The tail of a background task's output file.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct OutputTail {
+    /// The last [`PREVIEW_LINES`] lines, see [`output_preview`].
+    pub output: Option<SharedString>,
     pub last_line: Option<SharedString>,
     pub url: Option<SharedString>,
     pub modified_at: Option<std::time::SystemTime>,
@@ -783,6 +808,8 @@ pub struct BackgroundItem {
     pub status: BackgroundStatus,
     pub started_at: Option<Instant>,
     pub expires_at: Option<Instant>,
+    /// The end of its output, for the log preview.
+    pub output: Option<SharedString>,
     pub last_line: Option<SharedString>,
     pub url: Option<SharedString>,
     pub last_output_at: Option<std::time::SystemTime>,
@@ -862,6 +889,7 @@ pub fn build_background(
                         status: BackgroundStatus::Running,
                         started_at: Some(terminal.started_at),
                         expires_at: None,
+                        output: terminal.output.clone(),
                         last_line: terminal.last_line.clone(),
                         url: terminal
                             .last_line
@@ -924,6 +952,7 @@ pub fn build_background(
             status,
             started_at,
             expires_at,
+            output: tail.and_then(|tail| tail.output.clone()),
             last_line: tail.and_then(|tail| tail.last_line.clone()),
             url: tail.and_then(|tail| tail.url.clone()),
             last_output_at: tail.and_then(|tail| tail.modified_at),

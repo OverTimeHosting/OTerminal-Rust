@@ -30,7 +30,7 @@ use crate::model::{
 
 pub const REFRESH_DEBOUNCE: Duration = Duration::from_millis(200);
 const TAIL_INTERVAL: Duration = Duration::from_secs(3);
-const TAIL_BYTES: u64 = 16 * 1024;
+const TAIL_BYTES: u64 = 64 * 1024;
 
 struct GlobalAgentsStore(Entity<AgentsStore>);
 
@@ -93,6 +93,9 @@ struct TrackedThread {
 pub struct AgentsStore {
     threads: Vec<TrackedThread>,
     output_tails: HashMap<PathBuf, OutputTail>,
+    /// Output files with an open log preview, tailed even after their
+    /// command stopped.
+    previewed_outputs: HashSet<PathBuf>,
     viewers: usize,
     refresh_task: Option<Task<()>>,
     tail_task: Option<Task<()>>,
@@ -124,6 +127,7 @@ impl AgentsStore {
         Self {
             threads: Vec::new(),
             output_tails: HashMap::default(),
+            previewed_outputs: HashSet::default(),
             viewers: 0,
             refresh_task: None,
             tail_task: None,
@@ -286,8 +290,18 @@ impl AgentsStore {
         self.update_tail_task(cx);
     }
 
-    fn running_output_paths(&self) -> Vec<PathBuf> {
-        let mut paths = HashSet::default();
+    /// Keeps `path` tailed while a dashboard previews its log.
+    pub fn set_output_previewed(&mut self, path: PathBuf, previewed: bool, cx: &mut Context<Self>) {
+        if previewed {
+            self.previewed_outputs.insert(path);
+        } else {
+            self.previewed_outputs.remove(&path);
+        }
+        self.update_tail_task(cx);
+    }
+
+    fn tailed_output_paths(&self) -> Vec<PathBuf> {
+        let mut paths = self.previewed_outputs.clone();
         for snapshot in self.snapshots() {
             for item in &snapshot.background {
                 if item.status.is_running()
@@ -300,10 +314,10 @@ impl AgentsStore {
         paths.into_iter().collect()
     }
 
-    /// Tails the output files of running background commands while a
-    /// dashboard is open.
+    /// Tails the output files of running background commands, and of those
+    /// with an open log preview, while a dashboard is open.
     fn update_tail_task(&mut self, cx: &mut Context<Self>) {
-        let wanted = self.viewers > 0 && !self.running_output_paths().is_empty();
+        let wanted = self.viewers > 0 && !self.tailed_output_paths().is_empty();
         if !wanted {
             self.tail_task = None;
             return;
@@ -313,7 +327,7 @@ impl AgentsStore {
         }
         self.tail_task = Some(cx.spawn(async move |this, cx| {
             loop {
-                let Ok(paths) = this.read_with(cx, |this, _| this.running_output_paths()) else {
+                let Ok(paths) = this.read_with(cx, |this, _| this.tailed_output_paths()) else {
                     return;
                 };
                 if paths.is_empty() {
@@ -610,6 +624,15 @@ fn call_record(
             } else {
                 None
             },
+            output: if running {
+                model::output_preview(
+                    &inner
+                        .last_n_non_empty_lines(model::PREVIEW_LINES)
+                        .join("\n"),
+                )
+            } else {
+                None
+            },
         }
     });
 
@@ -661,10 +684,16 @@ fn read_output_tail(path: &Path) -> Option<OutputTail> {
     let mut bytes = Vec::new();
     file.take(TAIL_BYTES).read_to_end(&mut bytes).ok()?;
     let text = String::from_utf8_lossy(&bytes);
+    // A tail that starts inside the file most likely starts inside a line.
+    let text = match text.split_once('\n') {
+        Some((_, rest)) if start > 0 => rest,
+        _ => text.as_ref(),
+    };
     let lines: Vec<&str> = text.lines().rev().take(60).collect::<Vec<_>>();
     let lines: Vec<&str> = lines.into_iter().rev().collect();
     Some(OutputTail {
-        last_line: model::last_line(&text),
+        output: model::output_preview(text),
+        last_line: model::last_line(text),
         url: model::detect_url(&lines),
         modified_at: metadata.modified().ok().or(Some(SystemTime::UNIX_EPOCH)),
     })

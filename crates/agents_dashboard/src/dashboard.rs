@@ -1,9 +1,10 @@
 //! The "Agents" workspace item: every Claude Code thread of the app, live,
 //! with its sub-agent tree and background work.
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
-use collections::HashSet;
+use collections::{HashMap, HashSet};
 use gpui::{
     AnyElement, App, ClickEvent, Context, ElementId, Entity, EntityId, EventEmitter, FocusHandle,
     Focusable, IntoElement, ParentElement, Render, ScrollHandle, SharedString, Styled,
@@ -24,6 +25,10 @@ use crate::model::{
 use crate::store::{AgentsStore, LocationKind, ThreadSnapshot};
 
 const TICK: Duration = Duration::from_secs(1);
+const LOG_PREVIEW_MAX_HEIGHT: gpui::Pixels = px(280.);
+/// A log preview scrolled to within this distance of its end follows new
+/// output.
+const LOG_PREVIEW_FOLLOW_DISTANCE: gpui::Pixels = px(12.);
 
 pub struct AgentsDashboard {
     store: Entity<AgentsStore>,
@@ -32,6 +37,8 @@ pub struct AgentsDashboard {
     /// Collapsed nodes, keyed by thread and node id (`""` = the thread).
     collapsed: HashSet<(EntityId, SharedString)>,
     show_inactive: bool,
+    /// Open log previews of background items, keyed by thread and call id.
+    log_previews: HashMap<(EntityId, SharedString), ScrollHandle>,
     scroll_handle: ScrollHandle,
     ticker: Option<Task<()>>,
     _subscriptions: Vec<Subscription>,
@@ -58,6 +65,7 @@ impl AgentsDashboard {
         cx: &mut Context<Self>,
     ) -> Self {
         let subscriptions = vec![cx.observe(&store, |this, _, cx| {
+            this.follow_log_previews();
             this.update_ticker(cx);
             cx.notify();
         })];
@@ -75,6 +83,7 @@ impl AgentsDashboard {
             focus_handle: cx.focus_handle(),
             collapsed: HashSet::default(),
             show_inactive: true,
+            log_previews: HashMap::default(),
             scroll_handle: ScrollHandle::new(),
             ticker: None,
             _subscriptions: subscriptions,
@@ -109,6 +118,37 @@ impl AgentsDashboard {
             self.collapsed.insert(key);
         }
         cx.notify();
+    }
+
+    fn toggle_log_preview(
+        &mut self,
+        key: (EntityId, SharedString),
+        output_path: Option<PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        let previewed = self.log_previews.remove(&key).is_none();
+        if previewed {
+            let scroll_handle = ScrollHandle::new();
+            scroll_handle.scroll_to_bottom();
+            self.log_previews.insert(key, scroll_handle);
+        }
+        if let Some(path) = output_path {
+            self.store.update(cx, |store, cx| {
+                store.set_output_previewed(path, previewed, cx)
+            });
+        }
+        cx.notify();
+    }
+
+    /// Keeps the log previews that show the end of their output there when
+    /// more arrives. One the user scrolled up in stays where it is.
+    fn follow_log_previews(&self) {
+        for scroll_handle in self.log_previews.values() {
+            let distance_from_end = scroll_handle.max_offset().y + scroll_handle.offset().y;
+            if distance_from_end <= LOG_PREVIEW_FOLLOW_DISTANCE {
+                scroll_handle.scroll_to_bottom();
+            }
+        }
     }
 
     fn render_header(
@@ -649,9 +689,56 @@ impl AgentsDashboard {
         let call_id = item.call_id.clone();
         let store = self.store.clone();
 
+        let preview_key = (thread, item.call_id.clone());
+        let preview_scroll_handle = self.log_previews.get(&preview_key).cloned();
+        let has_preview = item.output_path.is_some() || item.kind == BackgroundKind::Terminal;
+        let preview_toggle = has_preview.then(|| {
+            let output_path = item.output_path.clone();
+            IconButton::new(
+                ElementId::Name(format!("bg-preview-{element_key}").into()),
+                IconName::ToolTerminal,
+            )
+            .icon_size(IconSize::XSmall)
+            .toggle_state(preview_scroll_handle.is_some())
+            .tooltip(Tooltip::text(if preview_scroll_handle.is_some() {
+                "Hide output"
+            } else {
+                "Preview output"
+            }))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.toggle_log_preview(preview_key.clone(), output_path.clone(), cx);
+            }))
+        });
+        let preview = preview_scroll_handle.map(|scroll_handle| {
+            let (text, color) = match &item.output {
+                Some(output) => (output.clone(), Color::Default),
+                None => ("No output yet".into(), Color::Muted),
+            };
+            div()
+                .id(ElementId::Name(format!("bg-log-{element_key}").into()))
+                .ml(px(22.))
+                .mr_1()
+                .mb_1()
+                .p_1p5()
+                .max_h(LOG_PREVIEW_MAX_HEIGHT)
+                .overflow_y_scroll()
+                .track_scroll(&scroll_handle)
+                .rounded_sm()
+                .border_1()
+                .border_color(colors.border_variant)
+                .bg(colors.editor_background)
+                .child(
+                    Label::new(text)
+                        .size(LabelSize::XSmall)
+                        .color(color)
+                        .buffer_font(cx),
+                )
+        });
+
         let actions = h_flex()
             .flex_none()
             .gap_0p5()
+            .children(preview_toggle)
             .when_some(url.clone(), |this, url| {
                 this.child(
                     Button::new(
@@ -707,7 +794,7 @@ impl AgentsDashboard {
                 )
             });
 
-        h_flex()
+        let row = h_flex()
             .id(ElementId::Name(format!("bg-{element_key}").into()))
             .w_full()
             .px_1()
@@ -783,7 +870,12 @@ impl AgentsDashboard {
                         )
                     }),
             )
-            .child(actions)
+            .child(actions);
+
+        v_flex()
+            .w_full()
+            .child(row)
+            .children(preview)
             .into_any_element()
     }
 }

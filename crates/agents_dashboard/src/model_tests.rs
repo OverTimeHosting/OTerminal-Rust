@@ -391,6 +391,31 @@ fn detects_urls_and_ports() {
 }
 
 #[test]
+fn output_preview_is_plain_text_of_the_last_lines() {
+    assert_eq!(output_preview(""), None);
+    assert_eq!(output_preview("\n  \n\x1b[0m\n"), None);
+    assert_eq!(
+        output_preview(
+            "\n\x1b[32mready\x1b[0m in 120ms  \r\n\nbuilding 10%\rbuilding 100%\n  indented\n\n"
+        )
+        .as_deref(),
+        Some("ready in 120ms\n\nbuilding 100%\n  indented")
+    );
+
+    let long = (0..PREVIEW_LINES + 50)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let preview = output_preview(&long).unwrap_or_default();
+    assert_eq!(preview.lines().count(), PREVIEW_LINES);
+    assert_eq!(preview.lines().next(), Some("line 50"));
+    assert_eq!(
+        preview.lines().last(),
+        Some(format!("line {}", PREVIEW_LINES + 49).as_str())
+    );
+}
+
+#[test]
 fn background_items_and_counts() {
     let now = Instant::now();
     let mut dev = record(
@@ -457,6 +482,7 @@ fn background_items_and_counts() {
     tails.insert(
         PathBuf::from("/tmp/b1.output"),
         OutputTail {
+            output: Some("vite ready\nLocal: http://localhost:5173/".into()),
             last_line: Some("Local: http://localhost:5173/".into()),
             url: Some("http://localhost:5173/".into()),
             modified_at: None,
@@ -467,6 +493,10 @@ fn background_items_and_counts() {
     assert_eq!(items.len(), 3, "dev, watcher and monitor");
     assert_eq!(items[0].status, BackgroundStatus::Running);
     assert_eq!(items[0].url.as_deref(), Some("http://localhost:5173/"));
+    assert_eq!(
+        items[0].output.as_deref(),
+        Some("vite ready\nLocal: http://localhost:5173/")
+    );
     assert_eq!(items[1].status, BackgroundStatus::Stopped);
     assert_eq!(items[1].owner.as_deref(), Some("agent"));
     assert_eq!(items[2].kind, BackgroundKind::Monitor);
