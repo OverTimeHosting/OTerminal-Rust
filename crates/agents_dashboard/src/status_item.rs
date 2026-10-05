@@ -6,8 +6,9 @@ use gpui::{Context, Entity, IntoElement, ParentElement, Render, Styled, Subscrip
 use ui::{ButtonLike, CommonAnimationExt as _, Icon, IconName, Tooltip, prelude::*};
 use workspace::{HideStatusItem, ItemHandle, StatusItemView};
 
-use crate::Open;
+use crate::remote_sessions::{self, SessionStartTimes};
 use crate::store::AgentsStore;
+use crate::{Open, OpenRemoteControl};
 
 pub struct AgentsStatusItem {
     store: Option<Entity<AgentsStore>>,
@@ -75,6 +76,64 @@ impl StatusItemView for AgentsStatusItem {
 
     fn hide_setting(&self, _: &gpui::App) -> Option<HideStatusItem> {
         // Only shown while agents or background commands are running.
+        None
+    }
+}
+
+/// The status bar's entry to the Remote Control tab, with the number of
+/// Remote Control sessions open in the app.
+pub struct RemoteControlStatusItem {
+    _subscription: Subscription,
+}
+
+impl RemoteControlStatusItem {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        Self {
+            _subscription: cx.observe_global::<SessionStartTimes>(|_, cx| cx.notify()),
+        }
+    }
+}
+
+impl Render for RemoteControlStatusItem {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let sessions = remote_sessions::open_session_count(cx);
+        let color = if sessions > 0 {
+            Color::Accent
+        } else {
+            Color::Muted
+        };
+        ButtonLike::new("remote-control-status-item")
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(
+                        Icon::new(IconName::SignalHigh)
+                            .size(IconSize::Small)
+                            .color(color),
+                    )
+                    .when(sessions > 0, |this| {
+                        this.child(Label::new(sessions.to_string()).size(LabelSize::Small))
+                    }),
+            )
+            .tooltip(Tooltip::for_action_title(
+                "Remote Control Sessions",
+                &OpenRemoteControl,
+            ))
+            .on_click(|_, window, cx| window.dispatch_action(Box::new(OpenRemoteControl), cx))
+    }
+}
+
+impl StatusItemView for RemoteControlStatusItem {
+    fn set_active_pane_item(
+        &mut self,
+        _: Option<&dyn ItemHandle>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) {
+    }
+
+    fn hide_setting(&self, _: &gpui::App) -> Option<HideStatusItem> {
+        // Always shown: it is how the Remote Control tab is found.
         None
     }
 }

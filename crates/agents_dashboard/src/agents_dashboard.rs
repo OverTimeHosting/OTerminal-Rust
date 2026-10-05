@@ -22,7 +22,7 @@ use workspace::Workspace;
 
 pub use dashboard::AgentsDashboard;
 pub use remote_dashboard::RemoteControlDashboard;
-pub use status_item::AgentsStatusItem;
+pub use status_item::{AgentsStatusItem, RemoteControlStatusItem};
 pub use store::{AgentsStore, ThreadSnapshot};
 
 actions!(

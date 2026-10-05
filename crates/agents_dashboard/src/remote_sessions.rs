@@ -31,9 +31,15 @@ const SUBMIT_DELAY: Duration = Duration::from_millis(150);
 /// When each Remote Control terminal was created, as [`Terminal`] doesn't
 /// record it.
 #[derive(Default)]
-struct SessionStartTimes(HashMap<EntityId, Instant>);
+pub(crate) struct SessionStartTimes(HashMap<EntityId, Instant>);
 
 impl Global for SessionStartTimes {}
+
+/// How many Remote Control terminals are open, without walking the windows.
+pub(crate) fn open_session_count(cx: &App) -> usize {
+    cx.try_global::<SessionStartTimes>()
+        .map_or(0, |start_times| start_times.0.len())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionState {
