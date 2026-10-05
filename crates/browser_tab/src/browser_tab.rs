@@ -13,15 +13,20 @@ use anyhow::Result;
 use db::kvp::KeyValueStore;
 use editor::{Editor, EditorEvent, actions::SelectAll};
 use gpui::{
-    AnyWindowHandle, App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement,
-    ParentElement, Render, SharedString, Styled, Subscription, Task, WeakEntity, Window, actions,
-    div,
+    Action, AnyWindowHandle, App, Bounds, ClipboardItem, Context, DismissEvent, Entity,
+    EventEmitter, FocusHandle, Focusable, IntoElement, ParentElement, Pixels, Point, Render,
+    SharedString, Styled, Subscription, Task, WeakEntity, Window, actions, anchored, deferred, div,
+    point, px,
 };
 use project::Project;
-use ui::{ContextMenu, Icon, IconButton, IconName, Tooltip, prelude::*, right_click_menu};
+use ui::{
+    ContextMenu, ContextMenuEntry, Icon, IconButton, IconName, Tooltip, prelude::*,
+    right_click_menu,
+};
 use util::ResultExt as _;
 use workspace::{
-    Item, ItemId, ModalLayer, SerializableItem, Workspace, WorkspaceId, item::ItemEvent,
+    Item, ItemId, NewCenterTerminal, NewTerminal, Pane, SerializableItem, Workspace, WorkspaceId,
+    item::ItemEvent,
 };
 
 pub use bookmarks::{Bookmark, BookmarkStore};
@@ -197,12 +202,66 @@ fn bookmark_title(title: Option<&str>, url: &str) -> String {
     }
 }
 
+/// Only `http` and `https` links are opened from a page's context menu: the
+/// URL comes from the page, which could otherwise point a new tab at a local
+/// file or a script.
+fn is_web_url(url: &str) -> bool {
+    url::Url::parse(url).is_ok_and(|url| matches!(url.scheme(), "http" | "https"))
+}
+
+/// Where in the window a point of the page is. `x` and `y` are CSS pixels
+/// from the top left of the page's viewport, which are GPUI's logical pixels
+/// as long as the page is not zoomed. They come from the page, so they are
+/// kept inside `content_bounds`.
+fn page_point_in_window(content_bounds: Bounds<Pixels>, x: f32, y: f32) -> Point<Pixels> {
+    let inside = |offset: f32, extent: Pixels| {
+        let extent = f32::from(extent).max(0.);
+        if offset.is_finite() {
+            px(offset.clamp(0., extent))
+        } else {
+            px(0.)
+        }
+    };
+    point(
+        content_bounds.origin.x + inside(x, content_bounds.size.width),
+        content_bounds.origin.y + inside(y, content_bounds.size.height),
+    )
+}
+
+fn insert_text_script(text: &str) -> Result<String> {
+    // Encoded as a JSON string, which is also a JavaScript string literal,
+    // so nothing in the clipboard can end the literal and run as script.
+    let literal = serde_json::to_string(text)?;
+    Ok(format!(
+        "document.execCommand('insertText', false, {literal});"
+    ))
+}
+
+/// A right-click in the page, as reported by the page itself. Every field
+/// is untrusted and only ever used as data.
+// Only the Windows page reports right-clicks, so elsewhere nothing builds
+// one of these.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PageContextMenuRequest {
+    /// CSS pixels from the top left of the page's viewport.
+    x: f32,
+    y: f32,
+    link_url: Option<String>,
+    image_url: Option<String>,
+    selected_text: Option<String>,
+    editable: bool,
+}
+
 #[cfg(target_os = "windows")]
 pub(crate) enum PageEvent {
     Navigated(String),
     TitleChanged(String),
     /// The page asked for a new window (`target="_blank"`, `window.open`).
     NewWindowRequested(String),
+    ContextMenuRequested(PageContextMenuRequest),
+    /// A mouse button went down in the page, which GPUI does not see.
+    PointerDown,
 }
 
 pub enum BrowserTabEvent {
@@ -218,8 +277,9 @@ pub struct BrowserTab {
     can_go_forward: bool,
     bookmark_store: Option<Entity<BookmarkStore>>,
     page: Page,
+    page_context_menu: Option<(Entity<ContextMenu>, Point<Pixels>, Subscription)>,
     window: AnyWindowHandle,
-    modal_layer: Option<Entity<ModalLayer>>,
+    workspace: Option<WeakEntity<Workspace>>,
     _subscriptions: Vec<Subscription>,
     _workspace_subscriptions: Vec<Subscription>,
 }
@@ -266,8 +326,9 @@ impl BrowserTab {
             can_go_forward: false,
             bookmark_store,
             page: Page::new(cx),
+            page_context_menu: None,
             window: window.window_handle(),
-            modal_layer: None,
+            workspace: None,
             _subscriptions: subscriptions,
             _workspace_subscriptions: Vec::new(),
         }
@@ -277,6 +338,18 @@ impl BrowserTab {
     pub fn open_new(workspace: &mut Workspace, window: &mut Window, cx: &mut Context<Workspace>) {
         let tab = cx.new(|cx| Self::new(None, window, cx));
         workspace.add_item_to_active_pane(Box::new(tab), None, true, window, cx);
+    }
+
+    /// Opens `url` in a new browser tab in `pane`.
+    pub fn open_url(
+        url: String,
+        pane: Entity<Pane>,
+        workspace: &mut Workspace,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        let tab = cx.new(|cx| Self::new(Some(url), window, cx));
+        workspace.add_item(pane, Box::new(tab), None, true, true, window, cx);
     }
 
     pub fn current_url(&self) -> &str {
@@ -337,8 +410,198 @@ impl BrowserTab {
         });
     }
 
+    // Only the Windows page reports right-clicks; elsewhere this is never
+    // called.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    fn deploy_page_context_menu(
+        &mut self,
+        request: PageContextMenuRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(content_bounds) = self.page.content_bounds() else {
+            return;
+        };
+        let position = page_point_in_window(content_bounds, request.x, request.y);
+        let menu = self.build_page_context_menu(request, window, cx);
+        // The right-click gave the page the keyboard, and the menu is
+        // driven by keys that only reach GPUI's own window.
+        self.page.release_keyboard_focus();
+        window.focus(&menu.focus_handle(cx), cx);
+        let subscription =
+            cx.subscribe_in(&menu, window, |this, menu, _: &DismissEvent, window, cx| {
+                this.page_context_menu_dismissed(menu, window, cx);
+            });
+        self.page_context_menu = Some((menu, position, subscription));
+        self.request_visibility_checks(VISIBILITY_CHECKS_AFTER_CHANGE, window, cx);
+        cx.notify();
+    }
+
+    fn page_context_menu_dismissed(
+        &mut self,
+        menu: &Entity<ContextMenu>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let is_current = self
+            .page_context_menu
+            .as_ref()
+            .is_some_and(|(current, _, _)| current == menu);
+        if !is_current {
+            return;
+        }
+        // The menu took the keyboard from the page. Unless the chosen entry
+        // or a click moved the focus somewhere else, the page gets it back.
+        if window.is_window_active() && menu.focus_handle(cx).contains_focused(window, cx) {
+            self.page.focus();
+        }
+        self.close_page_context_menu(window, cx);
+    }
+
+    fn close_page_context_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.page_context_menu.take().is_some() {
+            self.request_visibility_checks(VISIBILITY_CHECKS_AFTER_CHANGE, window, cx);
+            cx.notify();
+        }
+    }
+
+    fn build_page_context_menu(
+        &self,
+        request: PageContextMenuRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<ContextMenu> {
+        let PageContextMenuRequest {
+            link_url,
+            image_url,
+            selected_text,
+            editable,
+            ..
+        } = request;
+        let tab = cx.weak_entity();
+        let focus_handle = self.focus_handle(cx);
+        let can_go_back = self.can_go_back;
+        let can_go_forward = self.can_go_forward;
+        let page_url = self.current_url.clone();
+        let bookmarked = self
+            .bookmark_store
+            .as_ref()
+            .is_some_and(|store| store.read(cx).is_bookmarked(&self.current_url));
+        let web_link_url = link_url.clone().filter(|url| is_web_url(url));
+        let clipboard_has_text = editable
+            && cx
+                .read_from_clipboard()
+                .and_then(|item| item.text())
+                .is_some();
+        let has_target_entries =
+            link_url.is_some() || image_url.is_some() || selected_text.is_some() || editable;
+        // Claude Code's action is looked up by name since this crate can't
+        // depend on agent_ui.
+        let new_claude_tab = cx.build_action("agent::NewClaudeTab", None).ok();
+
+        ContextMenu::build(window, cx, move |menu, _, _| {
+            // The new-tab entries are workspace actions, which have to be
+            // dispatched from inside the workspace rather than from the menu.
+            menu.context(focus_handle)
+                .item(
+                    ContextMenuEntry::new("Back")
+                        .disabled(!can_go_back)
+                        .handler(tab_entry_handler(&tab, |tab, _| tab.page.go_back())),
+                )
+                .item(
+                    ContextMenuEntry::new("Forward")
+                        .disabled(!can_go_forward)
+                        .handler(tab_entry_handler(&tab, |tab, _| tab.page.go_forward())),
+                )
+                .entry(
+                    "Reload",
+                    None,
+                    tab_entry_handler(&tab, |tab, _| tab.page.reload()),
+                )
+                .when(has_target_entries, |menu| menu.separator())
+                .when_some(web_link_url, |menu, url| {
+                    menu.entry("Open Link in New Browser Tab", None, {
+                        let tab = tab.clone();
+                        move |window, cx| open_link_in_new_tab(&tab, url.clone(), window, cx)
+                    })
+                })
+                .when_some(link_url, |menu, url| {
+                    menu.entry("Copy Link Address", None, copy_handler(url))
+                })
+                .when_some(image_url, |menu, url| {
+                    menu.entry("Copy Image Address", None, copy_handler(url))
+                })
+                .when_some(selected_text.clone(), |menu, text| {
+                    menu.entry("Copy", None, copy_handler(text))
+                })
+                .when(editable, |menu| {
+                    menu.when_some(selected_text, |menu, text| {
+                        menu.entry(
+                            "Cut",
+                            None,
+                            tab_entry_handler(&tab, move |tab, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                                tab.run_editing_script("document.execCommand('delete');");
+                            }),
+                        )
+                    })
+                    .item(
+                        ContextMenuEntry::new("Paste")
+                            .disabled(!clipboard_has_text)
+                            .handler(tab_entry_handler(&tab, |tab, cx| {
+                                let Some(text) =
+                                    cx.read_from_clipboard().and_then(|item| item.text())
+                                else {
+                                    return;
+                                };
+                                if let Some(script) = insert_text_script(&text).log_err() {
+                                    tab.run_editing_script(&script);
+                                }
+                            })),
+                    )
+                    .entry(
+                        "Select All",
+                        None,
+                        tab_entry_handler(&tab, |tab, _| {
+                            tab.run_editing_script("document.execCommand('selectAll');");
+                        }),
+                    )
+                })
+                .separator()
+                .entry(
+                    if bookmarked {
+                        "Remove Bookmark"
+                    } else {
+                        "Bookmark This Page"
+                    },
+                    None,
+                    tab_entry_handler(&tab, |tab, cx| tab.toggle_bookmark(cx)),
+                )
+                .entry("Copy Page Address", None, copy_handler(page_url))
+                .separator()
+                .when_some(new_claude_tab, |menu, action| {
+                    menu.action("New Claude Code Tab", action)
+                })
+                .action("New Browser Tab", NewTab.boxed_clone())
+                .action("New Terminal", NewTerminal::default().boxed_clone())
+                .action(
+                    "New Center Terminal",
+                    NewCenterTerminal::default().boxed_clone(),
+                )
+        })
+    }
+
+    fn run_editing_script(&self, script: &str) {
+        // Editing commands act on the focused document, and the menu took
+        // the focus away from the page.
+        self.page.focus();
+        self.page.run_script(script);
+    }
+
     #[cfg(target_os = "windows")]
     fn handle_page_event(&mut self, event: PageEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.can_go_back = self.page.can_go_back();
+        self.can_go_forward = self.page.can_go_forward();
         match event {
             PageEvent::Navigated(url) => self.page_url_changed(url, window, cx),
             PageEvent::TitleChanged(title) => {
@@ -349,9 +612,11 @@ impl BrowserTab {
                 cx.emit(BrowserTabEvent::UpdateTab);
             }
             PageEvent::NewWindowRequested(url) => self.navigate(url, window, cx),
+            PageEvent::ContextMenuRequested(request) => {
+                self.deploy_page_context_menu(request, window, cx)
+            }
+            PageEvent::PointerDown => self.close_page_context_menu(window, cx),
         }
-        self.can_go_back = self.page.can_go_back();
-        self.can_go_forward = self.page.can_go_forward();
         cx.notify();
     }
 
@@ -494,6 +759,44 @@ impl BrowserTab {
     }
 }
 
+fn tab_entry_handler(
+    tab: &WeakEntity<BrowserTab>,
+    handler: impl Fn(&mut BrowserTab, &mut Context<BrowserTab>) + 'static,
+) -> impl Fn(&mut Window, &mut App) + 'static {
+    let tab = tab.clone();
+    move |_, cx| {
+        tab.update(cx, |tab, cx| handler(tab, cx)).log_err();
+    }
+}
+
+fn copy_handler(text: String) -> impl Fn(&mut Window, &mut App) + 'static {
+    move |_, cx| cx.write_to_clipboard(ClipboardItem::new_string(text.clone()))
+}
+
+fn open_link_in_new_tab(
+    tab: &WeakEntity<BrowserTab>,
+    url: String,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(tab) = tab.upgrade() else {
+        return;
+    };
+    let Some(workspace) = tab.read(cx).workspace.clone() else {
+        return;
+    };
+    // Not done from inside an update of `tab`: adding an item to its pane
+    // deactivates it, which updates it.
+    workspace
+        .update(cx, |workspace, cx| {
+            let pane = workspace
+                .pane_for(&tab)
+                .unwrap_or_else(|| workspace.active_pane().clone());
+            BrowserTab::open_url(url, pane, workspace, window, cx);
+        })
+        .log_err();
+}
+
 impl EventEmitter<BrowserTabEvent> for BrowserTab {}
 
 impl Focusable for BrowserTab {
@@ -509,6 +812,9 @@ impl Render for BrowserTab {
             .bg(cx.theme().colors().editor_background)
             .child(self.render_toolbar(cx))
             .children(self.render_bookmarks_bar(cx))
+            .children(self.page_context_menu.as_ref().map(|(menu, position, _)| {
+                deferred(anchored().position(*position).child(menu.clone())).with_priority(1)
+            }))
             .child(
                 div()
                     .flex_1()
@@ -555,7 +861,7 @@ impl Item for BrowserTab {
         cx: &mut Context<Self>,
     ) {
         self.window = window.window_handle();
-        self.modal_layer = Some(workspace.modal_layer().clone());
+        self.workspace = Some(workspace.weak_handle());
         // Modals, notifications and zoomed panels are drawn over the page by
         // the workspace without this tab being repainted.
         let mut subscriptions =
@@ -644,7 +950,10 @@ impl SerializableItem for BrowserTab {
 
 #[cfg(not(target_os = "windows"))]
 mod unsupported {
-    use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, WeakEntity, Window, div};
+    use gpui::{
+        AnyElement, Bounds, Context, IntoElement, ParentElement, Pixels, Styled, WeakEntity,
+        Window, div,
+    };
     use ui::{Color, Label, LabelCommon as _};
 
     use crate::BrowserTab;
@@ -670,6 +979,12 @@ mod unsupported {
         pub(crate) fn release_keyboard_focus(&self) {}
 
         pub(crate) fn hide(&self) {}
+
+        pub(crate) fn run_script(&self, _script: &str) {}
+
+        pub(crate) fn content_bounds(&self) -> Option<Bounds<Pixels>> {
+            None
+        }
 
         pub(crate) fn render(&self, _tab: WeakEntity<BrowserTab>) -> AnyElement {
             div()
@@ -786,6 +1101,53 @@ mod tests {
         assert!(title.chars().count() <= MAX_TAB_TITLE_CHARS + 1);
         assert!(title.starts_with("xxxx"));
         assert_ne!(title, "x".repeat(100));
+    }
+
+    #[test]
+    fn only_web_urls_open_from_the_context_menu() {
+        assert!(is_web_url("https://example.com/a?b=c"));
+        assert!(is_web_url("http://localhost:3000"));
+        for url in [
+            "file:///C:/Windows/system.ini",
+            "javascript:alert(1)",
+            "data:text/html,<script>alert(1)</script>",
+            "about:blank",
+            "mailto:someone@example.com",
+            "example.com",
+            "",
+        ] {
+            assert!(!is_web_url(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn page_points_are_offset_by_the_content_origin_and_kept_inside() {
+        let content = Bounds::new(point(px(100.), px(40.)), gpui::size(px(800.), px(600.)));
+        assert_eq!(
+            page_point_in_window(content, 10., 20.),
+            point(px(110.), px(60.))
+        );
+        assert_eq!(
+            page_point_in_window(content, -5., 9000.),
+            point(px(100.), px(640.))
+        );
+        assert_eq!(
+            page_point_in_window(content, f32::NAN, f32::INFINITY),
+            point(px(100.), px(40.))
+        );
+    }
+
+    #[test]
+    fn pasted_text_is_a_string_literal_in_the_script() -> Result<()> {
+        assert_eq!(
+            insert_text_script("hello")?,
+            r#"document.execCommand('insertText', false, "hello");"#
+        );
+        assert_eq!(
+            insert_text_script("\"); alert(1); (\"\n")?,
+            r#"document.execCommand('insertText', false, "\"); alert(1); (\"\n");"#
+        );
+        Ok(())
     }
 
     #[test]

@@ -21,14 +21,15 @@ use futures::{
     channel::mpsc::{self, UnboundedSender},
 };
 use gpui::{
-    AnyElement, AppContext as _, Bounds, Context, DispatchPhase, Hitbox, HitboxBehavior,
-    IntoElement, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, SharedString,
-    Styled, Task, WeakEntity, Window, canvas, div, px,
+    AnyElement, AppContext as _, Bounds, Context, DispatchPhase, ExternalPaths, Hitbox,
+    HitboxBehavior, IntoElement, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement,
+    Pixels, SharedString, Styled, Task, WeakEntity, Window, canvas, div, px,
 };
 use raw_window_handle::{
     HandleError, HasWindowHandle, RawWindowHandle, Win32WindowHandle, WindowHandle,
 };
-use ui::{Color, FluentBuilder as _, Label, LabelCommon as _, LabelSize};
+use serde::Deserialize;
+use ui::{Color, Label, LabelCommon as _};
 use util::ResultExt as _;
 use windows::Win32::{
     Foundation::HWND,
@@ -40,12 +41,122 @@ use wry::{
     dpi::{PhysicalPosition, PhysicalSize},
 };
 
-use crate::{BrowserTab, PageEvent};
+use workspace::{DraggedSelection, DraggedTab};
+
+use crate::{BrowserTab, PageContextMenuRequest, PageEvent};
 
 /// Overlays that open a few frames after the input that caused them are
 /// still noticed.
 const CHECKS_AFTER_INPUT: u8 = 3;
 const MIN_OVERLAY_SIZE: Pixels = px(24.);
+
+/// Runs in every document before its own scripts. It replaces WebView2's
+/// context menu in the top document with a report of what was right-clicked,
+/// and reports mouse presses, which GPUI cannot see inside the page's window.
+/// The limits here are the ones `parse_page_message` enforces.
+const PAGE_SCRIPT: &str = r#"(function () {
+  try {
+    var post = function (message) {
+      try {
+        window.ipc.postMessage(JSON.stringify(message));
+      } catch (error) {}
+    };
+    var bounded = function (value, limit) {
+      return typeof value === 'string' && value.length <= limit ? value : '';
+    };
+    window.addEventListener('pointerdown', function () {
+      post({ kind: 'pointer-down' });
+    }, true);
+    if (window.top !== window) {
+      return;
+    }
+    window.addEventListener('contextmenu', function (event) {
+      try {
+        event.preventDefault();
+        var path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+        var target = path[0] || event.target;
+        var element = target && target.nodeType === 1 ? target : (target && target.parentElement) || null;
+        var tag = element ? String(element.tagName).toUpperCase() : '';
+        var type = tag === 'INPUT' ? String(element.type).toLowerCase() : '';
+        var field = tag === 'TEXTAREA' || (tag === 'INPUT' &&
+          !/^(button|checkbox|color|file|hidden|image|radio|range|reset|submit)$/.test(type));
+        var link = element && element.closest ? element.closest('a[href], area[href]') : null;
+        var selection = type === 'password' ? '' : String(window.getSelection() || '');
+        post({
+          kind: 'context-menu',
+          x: event.clientX,
+          y: event.clientY,
+          link: link ? bounded(link.href, 8192) : '',
+          image: tag === 'IMG' ? bounded(element.currentSrc || element.src, 8192) : '',
+          selection: selection.slice(0, 10000),
+          editable: !!element &&
+            ((field && !element.disabled && !element.readOnly) || element.isContentEditable === true)
+        });
+      } catch (error) {}
+    }, true);
+  } catch (error) {}
+})();"#;
+
+/// Any page content can post messages, so anything larger than the script
+/// above could send is dropped unread.
+const MAX_PAGE_MESSAGE_BYTES: usize = 256 * 1024;
+const MAX_PAGE_URL_CHARS: usize = 8192;
+const MAX_SELECTION_CHARS: usize = 10_000;
+const MAX_PAGE_COORDINATE: f64 = 1_000_000.;
+
+#[derive(Debug, PartialEq)]
+enum PageMessage {
+    ContextMenu(PageContextMenuRequest),
+    PointerDown,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct RawPageMessage {
+    kind: String,
+    x: f64,
+    y: f64,
+    link: String,
+    image: String,
+    selection: String,
+    editable: bool,
+}
+
+/// Reads a message posted by [`PAGE_SCRIPT`]. Pages can post anything, so
+/// whatever is not such a message is an error, and what is kept of one is
+/// bounded.
+fn parse_page_message(message: &str) -> Result<PageMessage> {
+    if message.len() > MAX_PAGE_MESSAGE_BYTES {
+        return Err(anyhow!("message of {} bytes is too large", message.len()));
+    }
+    let raw: RawPageMessage = serde_json::from_str(message).context("not a page message")?;
+    match raw.kind.as_str() {
+        "pointer-down" => Ok(PageMessage::PointerDown),
+        "context-menu" => {
+            if !raw.x.is_finite() || !raw.y.is_finite() {
+                return Err(anyhow!("context menu position is not a number"));
+            }
+            let coordinate = |value: f64| value.clamp(0., MAX_PAGE_COORDINATE) as f32;
+            let url = |url: String| {
+                Some(url).filter(|url| {
+                    !url.is_empty()
+                        && url.chars().count() <= MAX_PAGE_URL_CHARS
+                        && url::Url::parse(url).is_ok()
+                })
+            };
+            let selected_text: String = raw.selection.chars().take(MAX_SELECTION_CHARS).collect();
+            Ok(PageMessage::ContextMenu(PageContextMenuRequest {
+                x: coordinate(raw.x),
+                y: coordinate(raw.y),
+                link_url: url(raw.link),
+                image_url: url(raw.image),
+                selected_text: Some(selected_text).filter(|text| !text.trim().is_empty()),
+                editable: raw.editable,
+            }))
+        }
+        _ => Err(anyhow!("unknown kind of page message")),
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct ParentWindow(NonZeroIsize);
@@ -128,6 +239,17 @@ impl WebView {
             .with_bounds(physical_rect(bounds, scale_factor))
             .with_visible(false)
             .with_focused(false)
+            .with_initialization_script(PAGE_SCRIPT)
+            .with_ipc_handler({
+                let send = send.clone();
+                move |request| match parse_page_message(request.body()) {
+                    Ok(PageMessage::ContextMenu(request)) => {
+                        send(PageEvent::ContextMenuRequested(request))
+                    }
+                    Ok(PageMessage::PointerDown) => send(PageEvent::PointerDown),
+                    Err(error) => log::debug!("ignoring a message from the page: {error:#}"),
+                }
+            })
             .with_on_page_load_handler({
                 let send = send.clone();
                 move |_, url| send(PageEvent::Navigated(url))
@@ -291,7 +413,6 @@ pub(crate) struct Page {
     events: UnboundedSender<PageEvent>,
     paint_tracker: Rc<PaintTracker>,
     painted: Option<PaintedContent>,
-    obscured: bool,
     remaining_checks: u8,
     check_scheduled: bool,
     _event_task: Task<()>,
@@ -319,7 +440,6 @@ impl Page {
             events,
             paint_tracker: Rc::default(),
             painted: None,
-            obscured: false,
             remaining_checks: 0,
             check_scheduled: false,
             _event_task: event_task,
@@ -389,6 +509,17 @@ impl Page {
         if let Some(web_view) = &self.web_view {
             web_view.release_keyboard_focus().log_err();
         }
+    }
+
+    pub(crate) fn run_script(&self, script: &str) {
+        if let Some(web_view) = &self.web_view {
+            wry_result(web_view.inner.evaluate_script(script)).log_err();
+        }
+    }
+
+    /// Where in the window the page was last painted.
+    pub(crate) fn content_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.painted.as_ref().map(|painted| painted.bounds)
     }
 
     /// Hides the page until its content element is painted again.
@@ -468,20 +599,7 @@ impl Page {
         )
         .size_full();
 
-        div()
-            .relative()
-            .size_full()
-            .child(content)
-            .when(self.obscured, |this| {
-                this.child(
-                    div().absolute().inset_0().p_4().child(
-                        Label::new("The page is hidden while something covers it.")
-                            .size(LabelSize::Small)
-                            .color(Color::Muted),
-                    ),
-                )
-            })
-            .into_any_element()
+        content.into_any_element()
     }
 }
 
@@ -611,26 +729,22 @@ impl BrowserTab {
         let mut holes = page_holes(bounds, &occluded_areas, scale_factor);
         let page = physical_rect(bounds, scale_factor);
         let page_size = page.size.to_physical::<i32>(1.);
-        // A modal's backdrop takes the mouse everywhere, which would hide the
-        // page altogether. Only what is drawn in front of the backdrop (the
-        // modal itself) needs to show over the page.
-        let modal_open = self
-            .modal_layer
-            .as_ref()
-            .is_some_and(|modal_layer| modal_layer.read(cx).has_active_modal());
-        if modal_open
-            && let Some(backdrop) = holes
-                .iter()
-                .position(|hole| hole.covers(page_size.width, page_size.height))
-            && backdrop > 0
+        // A backdrop (of a modal, say) takes the mouse everywhere without
+        // being drawn over the whole page. Only what is in front of it has
+        // to show over the page.
+        if let Some(backdrop) = holes
+            .iter()
+            .position(|hole| hole.covers(page_size.width, page_size.height))
         {
             holes.truncate(backdrop);
         }
-        // A dragged tab or file has no hitbox but is drawn over the page too.
-        let hidden = cx.has_active_drag()
-            || holes
-                .iter()
-                .any(|hole| hole.covers(page_size.width, page_size.height));
+        // A panel or another pane zoomed over this one is opaque. A dragged
+        // tab or file has no hitbox, and the drop targets GPUI draws for it
+        // would be behind the page.
+        let hidden = self.is_under_zoomed_view(cx)
+            || cx.has_active_drag_of::<DraggedTab>()
+            || cx.has_active_drag_of::<DraggedSelection>()
+            || cx.has_active_drag_of::<ExternalPaths>();
 
         if hidden {
             web_view.hide().log_err();
@@ -652,10 +766,22 @@ impl BrowserTab {
         if hidden || has_overlay {
             self.request_visibility_checks(1, window, cx);
         }
-        if hidden != self.page.obscured {
-            self.page.obscured = hidden;
-            cx.notify();
-        }
+    }
+
+    fn is_under_zoomed_view(&self, cx: &Context<Self>) -> bool {
+        let Some(workspace) = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.upgrade())
+        else {
+            return false;
+        };
+        let workspace = workspace.read(cx);
+        let Some(zoomed) = workspace.zoomed_item().and_then(|zoomed| zoomed.upgrade()) else {
+            return false;
+        };
+        let own_pane = workspace.pane_for(&cx.entity());
+        own_pane.is_none_or(|pane| pane.entity_id() != zoomed.entity_id())
     }
 }
 
@@ -706,6 +832,119 @@ mod tests {
             position: PhysicalPosition::new(x, y).into(),
             size: PhysicalSize::new(width, height).into(),
         }
+    }
+
+    fn context_menu_request(message: &str) -> Option<PageContextMenuRequest> {
+        match parse_page_message(message) {
+            Ok(PageMessage::ContextMenu(request)) => Some(request),
+            Ok(PageMessage::PointerDown) | Err(_) => None,
+        }
+    }
+
+    #[test]
+    fn a_context_menu_message_is_read() {
+        let request = context_menu_request(
+            r#"{"kind":"context-menu","x":120.5,"y":48,"link":"https://example.com/a?b=c",
+                "image":"https://example.com/cat.png","selection":"some text","editable":true,
+                "unknown":[1,2,3]}"#,
+        );
+        assert_eq!(
+            request,
+            Some(PageContextMenuRequest {
+                x: 120.5,
+                y: 48.,
+                link_url: Some("https://example.com/a?b=c".to_string()),
+                image_url: Some("https://example.com/cat.png".to_string()),
+                selected_text: Some("some text".to_string()),
+                editable: true,
+            })
+        );
+    }
+
+    #[test]
+    fn missing_fields_of_a_context_menu_message_are_empty() {
+        assert_eq!(
+            context_menu_request(r#"{"kind":"context-menu"}"#),
+            Some(PageContextMenuRequest {
+                x: 0.,
+                y: 0.,
+                link_url: None,
+                image_url: None,
+                selected_text: None,
+                editable: false,
+            })
+        );
+        let request = context_menu_request(
+            r#"{"kind":"context-menu","link":"","image":"not a url","selection":"  \n"}"#,
+        );
+        assert_eq!(
+            request.map(|request| (request.link_url, request.image_url, request.selected_text)),
+            Some((None, None, None))
+        );
+    }
+
+    #[test]
+    fn a_pointer_down_message_is_read() {
+        assert_eq!(
+            parse_page_message(r#"{"kind":"pointer-down"}"#).ok(),
+            Some(PageMessage::PointerDown)
+        );
+    }
+
+    #[test]
+    fn ill_typed_and_unknown_messages_are_rejected() {
+        for message in [
+            "",
+            "garbage",
+            "null",
+            "42",
+            r#""context-menu""#,
+            "[]",
+            "{}",
+            r#"{"kind":"something-else"}"#,
+            r#"{"kind":7}"#,
+            r#"{"kind":"context-menu","x":"12"}"#,
+            r#"{"kind":"context-menu","y":null}"#,
+            r#"{"kind":"context-menu","x":1e999}"#,
+            r#"{"kind":"context-menu","link":["https://example.com"]}"#,
+            r#"{"kind":"context-menu","selection":{"text":"a"}}"#,
+            r#"{"kind":"context-menu","editable":"yes"}"#,
+            r#"{"kind":"context-menu""#,
+        ] {
+            assert!(parse_page_message(message).is_err(), "{message}");
+        }
+    }
+
+    #[test]
+    fn context_menu_positions_are_bounded() {
+        let request = context_menu_request(r#"{"kind":"context-menu","x":-40,"y":1e300}"#)
+            .map(|request| (request.x, request.y));
+        assert_eq!(request, Some((0., MAX_PAGE_COORDINATE as f32)));
+    }
+
+    #[test]
+    fn oversized_strings_are_dropped_or_cut() -> Result<()> {
+        let long_url = format!("https://example.com/{}", "a".repeat(MAX_PAGE_URL_CHARS));
+        let message = serde_json::to_string(&serde_json::json!({
+            "kind": "context-menu",
+            "link": long_url,
+            "image": long_url,
+            "selection": "é".repeat(MAX_SELECTION_CHARS + 500),
+        }))?;
+        let request = context_menu_request(&message).context("message was rejected")?;
+        assert_eq!(request.link_url, None);
+        assert_eq!(request.image_url, None);
+        assert_eq!(
+            request.selected_text.map(|text| text.chars().count()),
+            Some(MAX_SELECTION_CHARS)
+        );
+
+        let huge = serde_json::to_string(&serde_json::json!({
+            "kind": "context-menu",
+            "selection": "a".repeat(MAX_PAGE_MESSAGE_BYTES),
+        }))?;
+        assert!(parse_page_message(&huge).is_err());
+        Ok(())
     }
 
     #[test]
