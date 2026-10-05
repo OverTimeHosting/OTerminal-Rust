@@ -3479,6 +3479,24 @@ impl Pane {
                         }
                     }
 
+                    // OTerminal: a tab's menu also opens new tabs. Looked up by
+                    // name since workspace can't depend on agent_ui or
+                    // browser_tab.
+                    let new_claude_tab = cx.build_action("agent::NewClaudeTab", None).ok();
+                    let new_browser_tab = cx.build_action("browser::NewTab", None).ok();
+                    menu = menu
+                        .separator()
+                        .when_some(new_claude_tab, |menu, action| {
+                            menu.action("New Claude Code Tab", action)
+                        })
+                        .when_some(new_browser_tab, |menu, action| {
+                            menu.action("New Browser Tab", action)
+                        })
+                        .action(
+                            "New Center Terminal",
+                            NewCenterTerminal::default().boxed_clone(),
+                        );
+
                     menu.context(menu_context)
                 })
             })
@@ -3724,6 +3742,12 @@ impl Pane {
             .min_w_6()
             .h(Tab::container_height(cx))
             .flex_grow_1()
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                    this.deploy_empty_pane_menu(event.position, window, cx);
+                }),
+            )
             // HACK: This empty child is currently necessary to force the drop target to appear
             // despite us setting a min width above.
             .child("")
@@ -4508,6 +4532,9 @@ impl Render for Pane {
             .size_full()
             .flex_none()
             .overflow_hidden()
+            .children(self.empty_pane_menu.as_ref().map(|(menu, position, _)| {
+                deferred(anchored().position(*position).child(menu.clone())).with_priority(1)
+            }))
             .on_action(cx.listener(|pane, split: &SplitLeft, window, cx| {
                 pane.split(SplitDirection::Left, split.mode, window, cx)
             }))
@@ -4715,13 +4742,7 @@ impl Render for Pane {
                                             this.deploy_empty_pane_menu(event.position, window, cx);
                                         },
                                     ),
-                                )
-                                .children(self.empty_pane_menu.as_ref().map(
-                                    |(menu, position, _)| {
-                                        deferred(anchored().position(*position).child(menu.clone()))
-                                            .with_priority(1)
-                                    },
-                                ));
+                                );
                             if has_worktrees || !self.should_display_welcome_page {
                                 placeholder
                             } else {
