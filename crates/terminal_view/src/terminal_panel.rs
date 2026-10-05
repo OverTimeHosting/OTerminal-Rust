@@ -73,7 +73,9 @@ pub struct NewTerminalWithProfile {
 /// The name of the built-in Claude Code profile.
 pub const CLAUDE_CODE_PROFILE: &str = "Claude Code";
 
-/// The name of the built-in profile that runs `claude remote-control`.
+/// The name of the built-in profile that runs an interactive Claude Code
+/// session with Remote Control enabled (`claude --remote-control`), so the same
+/// session is usable in this terminal and from claude.ai/code or the mobile app.
 pub const CLAUDE_REMOTE_CONTROL_PROFILE: &str = "Claude Code Remote Control";
 
 /// Terminal profiles provided at runtime (e.g. synced from OTHCloud), grouped by
@@ -213,7 +215,7 @@ pub fn builtin_terminal_profiles() -> Vec<(String, TerminalProfile)> {
         CLAUDE_REMOTE_CONTROL_PROFILE.to_string(),
         TerminalProfile {
             program: Some("claude".to_string()),
-            args: vec!["remote-control".to_string()],
+            args: vec!["--remote-control".to_string()],
             icon: Some("ai_claude".to_string()),
             ..Default::default()
         },
@@ -2345,6 +2347,10 @@ mod tests {
         apply_claude_launch_rules("claude", &mut args, [PathBuf::from("/a")]);
         assert_eq!(args, ["remote-control"]);
 
+        let mut args = vec!["--remote-control".to_string()];
+        apply_claude_launch_rules("claude", &mut args, [PathBuf::from("/a")]);
+        assert_eq!(args, ["--remote-control", "--add-dir", "/a"]);
+
         let mut args = Vec::new();
         apply_claude_launch_rules("pwsh", &mut args, [PathBuf::from("/a")]);
         assert!(args.is_empty());
@@ -2361,7 +2367,7 @@ mod tests {
             );
             assert_eq!(
                 profile.map(|profile| profile.args),
-                Some(vec!["remote-control".to_string()])
+                Some(vec!["--remote-control".to_string()])
             );
             assert!(
                 local_terminal_profile_names(cx)

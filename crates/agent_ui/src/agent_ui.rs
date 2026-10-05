@@ -236,8 +236,9 @@ actions!(
         RenameSelectedThread,
         /// Opens a new Claude Code thread as a tab in the center pane.
         NewClaudeTab,
-        /// Starts Claude Code Remote Control for this project in a terminal, so its
-        /// sessions can be used from claude.ai/code or the Claude mobile app.
+        /// Starts a Claude Code session with Remote Control in a terminal for this
+        /// project, so the same session can be used here and from claude.ai/code
+        /// or the Claude mobile app.
         StartClaudeRemoteControl,
         /// Moves the agent panel's current thread into a tab in the center pane.
         OpenThreadInTab,
