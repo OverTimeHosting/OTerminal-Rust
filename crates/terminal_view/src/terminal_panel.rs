@@ -78,6 +78,12 @@ pub const CLAUDE_CODE_PROFILE: &str = "Claude Code";
 /// session is usable in this terminal and from claude.ai/code or the mobile app.
 pub const CLAUDE_REMOTE_CONTROL_PROFILE: &str = "Claude Code Remote Control";
 
+/// The id of the task a terminal profile's terminal runs, which identifies the
+/// terminals started from that profile.
+pub fn terminal_profile_task_id(name: &str) -> TaskId {
+    TaskId(format!("terminal-profile:{name}"))
+}
+
 /// Terminal profiles provided at runtime (e.g. synced from OTHCloud), grouped by
 /// section. Entries are `(section, name, profile)`. These are never written to
 /// settings files.
@@ -1221,7 +1227,7 @@ impl TerminalPanel {
             .map(|part| part.as_str())
             .join(" ");
         Some(SpawnInTerminal {
-            id: TaskId(format!("terminal-profile:{name}")),
+            id: terminal_profile_task_id(name),
             full_label: name.to_string(),
             label: name.to_string(),
             command,
@@ -1667,6 +1673,15 @@ impl TerminalPanel {
 
     pub fn assistant_enabled(&self) -> bool {
         self.assistant_enabled
+    }
+
+    /// Returns the terminal views in all panes of the terminal panel.
+    pub fn terminal_views(&self, cx: &App) -> Vec<Entity<TerminalView>> {
+        self.center
+            .panes()
+            .into_iter()
+            .flat_map(|pane| pane.read(cx).items_of_type::<TerminalView>())
+            .collect()
     }
 
     /// Returns all panes in the terminal panel.

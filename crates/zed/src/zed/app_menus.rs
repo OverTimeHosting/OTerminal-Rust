@@ -57,6 +57,10 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
         agent_ui::StartClaudeRemoteControl,
     ));
     view_items.push(MenuItem::action("Agents Dashboard", agents_dashboard::Open));
+    view_items.push(MenuItem::action(
+        "Remote Control Sessions",
+        agents_dashboard::OpenRemoteControl,
+    ));
 
     view_items.extend([
         MenuItem::action("Git Panel", git_panel::ToggleFocus),

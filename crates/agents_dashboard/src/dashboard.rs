@@ -26,18 +26,71 @@ use crate::model::{
 };
 use crate::store::{AgentsStore, LocationKind, ThreadSnapshot};
 
-const TICK: Duration = Duration::from_secs(1);
+pub(crate) const TICK: Duration = Duration::from_secs(1);
 const LOG_PREVIEW_MAX_LINES: usize = 16;
 
-/// An open log preview of a background item.
-struct LogPreview {
+/// An open preview of the output of a background item or a terminal.
+pub(crate) struct LogPreview {
     /// Read-only, so the output can be selected and copied.
-    editor: Entity<Editor>,
+    pub(crate) editor: Entity<Editor>,
     /// The output `editor` shows.
-    text: Option<SharedString>,
+    pub(crate) text: Option<SharedString>,
     /// New output is held back while the user works in `editor`, so their
     /// selection and scroll position survive.
-    paused: bool,
+    pub(crate) paused: bool,
+}
+
+impl LogPreview {
+    pub(crate) fn new(window: &mut Window, cx: &mut App) -> Self {
+        let editor = cx.new(|cx| {
+            let mut editor = Editor::auto_height(1, LOG_PREVIEW_MAX_LINES, window, cx);
+            editor.set_read_only(true);
+            editor.set_show_gutter(false, cx);
+            editor.set_placeholder_text("No output yet", window, cx);
+            editor.set_custom_context_menu(|editor, _point, window, cx| {
+                let has_selection = editor.has_non_empty_selection(&editor.display_snapshot(cx));
+                Some(ContextMenu::build(window, cx, |menu, _, _| {
+                    menu.action_disabled_when(
+                        !has_selection,
+                        "Copy",
+                        Box::new(editor::actions::Copy),
+                    )
+                    .action("Select All", Box::new(editor::actions::SelectAll))
+                }))
+            });
+            editor.set_text_style_refinement(TextStyleRefinement {
+                font_family: Some(theme::theme_settings(cx).buffer_font(cx).family.clone()),
+                font_size: Some(
+                    TextSize::XSmall
+                        .rems(cx)
+                        .to_pixels(window.rem_size())
+                        .into(),
+                ),
+                ..Default::default()
+            });
+            editor
+        });
+        Self {
+            editor,
+            text: None,
+            paused: false,
+        }
+    }
+
+    /// Shows `output` and scrolls to its end, unless the user is working in
+    /// the preview.
+    pub(crate) fn sync(&mut self, output: Option<SharedString>, window: &mut Window, cx: &mut App) {
+        self.paused =
+            self.text != output && self.editor.focus_handle(cx).contains_focused(window, cx);
+        if self.text == output || self.paused {
+            return;
+        }
+        self.editor.update(cx, |editor, cx| {
+            editor.set_text(output.as_deref().unwrap_or_default(), window, cx);
+            editor.move_to_end(&MoveToEnd, window, cx);
+        });
+        self.text = output;
+    }
 }
 
 pub struct AgentsDashboard {
@@ -138,43 +191,7 @@ impl AgentsDashboard {
     ) {
         let previewed = self.log_previews.remove(&key).is_none();
         if previewed {
-            let editor = cx.new(|cx| {
-                let mut editor = Editor::auto_height(1, LOG_PREVIEW_MAX_LINES, window, cx);
-                editor.set_read_only(true);
-                editor.set_show_gutter(false, cx);
-                editor.set_placeholder_text("No output yet", window, cx);
-                editor.set_custom_context_menu(|editor, _point, window, cx| {
-                    let has_selection =
-                        editor.has_non_empty_selection(&editor.display_snapshot(cx));
-                    Some(ContextMenu::build(window, cx, |menu, _, _| {
-                        menu.action_disabled_when(
-                            !has_selection,
-                            "Copy",
-                            Box::new(editor::actions::Copy),
-                        )
-                        .action("Select All", Box::new(editor::actions::SelectAll))
-                    }))
-                });
-                editor.set_text_style_refinement(TextStyleRefinement {
-                    font_family: Some(theme::theme_settings(cx).buffer_font(cx).family.clone()),
-                    font_size: Some(
-                        TextSize::XSmall
-                            .rems(cx)
-                            .to_pixels(window.rem_size())
-                            .into(),
-                    ),
-                    ..Default::default()
-                });
-                editor
-            });
-            self.log_previews.insert(
-                key,
-                LogPreview {
-                    editor,
-                    text: None,
-                    paused: false,
-                },
-            );
+            self.log_previews.insert(key, LogPreview::new(window, cx));
         }
         if let Some(path) = output_path {
             self.store.update(cx, |store, cx| {
@@ -203,16 +220,7 @@ impl AgentsDashboard {
             let Some(output) = outputs.remove(key) else {
                 continue;
             };
-            preview.paused = preview.text != output
-                && preview.editor.focus_handle(cx).contains_focused(window, cx);
-            if preview.text == output || preview.paused {
-                continue;
-            }
-            preview.editor.update(cx, |editor, cx| {
-                editor.set_text(output.as_deref().unwrap_or_default(), window, cx);
-                editor.move_to_end(&MoveToEnd, window, cx);
-            });
-            preview.text = output;
+            preview.sync(output, window, cx);
         }
     }
 
@@ -1235,16 +1243,16 @@ impl Item for AgentsDashboard {
 /// The theme colors the dashboard uses, copied out so rendering can keep
 /// using `cx` mutably.
 #[derive(Clone, Copy)]
-struct Palette {
-    border: gpui::Hsla,
-    border_variant: gpui::Hsla,
-    ghost_element_hover: gpui::Hsla,
-    title_bar_background: gpui::Hsla,
-    editor_background: gpui::Hsla,
+pub(crate) struct Palette {
+    pub(crate) border: gpui::Hsla,
+    pub(crate) border_variant: gpui::Hsla,
+    pub(crate) ghost_element_hover: gpui::Hsla,
+    pub(crate) title_bar_background: gpui::Hsla,
+    pub(crate) editor_background: gpui::Hsla,
 }
 
 impl Palette {
-    fn new(cx: &App) -> Self {
+    pub(crate) fn new(cx: &App) -> Self {
         let colors = cx.theme().colors();
         Self {
             border: colors.border,
