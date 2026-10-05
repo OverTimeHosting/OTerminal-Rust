@@ -736,6 +736,7 @@ fn main() {
             cx,
         );
         agents_dashboard::init(cx);
+        browser_tab::init(cx);
         zed::watch_user_agents_md(app_state.fs.clone(), cx);
 
         repl::init(app_state.fs.clone(), cx);

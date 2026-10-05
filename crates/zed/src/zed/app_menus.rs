@@ -51,6 +51,7 @@ pub fn app_menus(cx: &mut App) -> Vec<Menu> {
         view_items.push(MenuItem::action("Agent Panel", assistant::ToggleFocus));
     }
     view_items.push(MenuItem::action("New Claude Code Tab", agent_ui::NewClaudeTab));
+    view_items.push(MenuItem::action("New Browser Tab", browser_tab::NewTab));
     view_items.push(MenuItem::action(
         "Claude Code Remote Control",
         agent_ui::StartClaudeRemoteControl,

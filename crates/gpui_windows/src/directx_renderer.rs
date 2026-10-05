@@ -1008,7 +1008,10 @@ impl DirectXRenderPipelines {
 impl DirectComposition {
     pub fn new(dxgi_device: &IDXGIDevice, hwnd: HWND) -> Result<Self> {
         let comp_device = get_comp_device(dxgi_device)?;
-        let comp_target = unsafe { comp_device.CreateTargetForHwnd(hwnd, true) }?;
+        // OTerminal: not topmost, so the visual tree is composed behind the
+        // window's child windows. A topmost tree covers them, which hides a
+        // web view hosted in a child window (browser tabs) entirely.
+        let comp_target = unsafe { comp_device.CreateTargetForHwnd(hwnd, false) }?;
         let comp_visual = unsafe { comp_device.CreateVisual() }?;
 
         Ok(Self {

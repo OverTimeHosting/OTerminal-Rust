@@ -4355,13 +4355,20 @@ fn default_render_tab_bar_buttons(
                 .anchor(Anchor::TopRight)
                 .with_handle(pane.new_item_context_menu_handle.clone())
                 .menu(move |window, cx| {
-                    // OTerminal: "New Claude Code Tab", looked up by name
-                    // since workspace can't depend on agent_ui.
+                    // OTerminal: "New Claude Code Tab" and "New Browser Tab",
+                    // looked up by name since workspace can't depend on
+                    // agent_ui or browser_tab.
                     let new_claude_tab = cx.build_action("agent::NewClaudeTab", None).ok();
+                    let new_browser_tab = cx.build_action("browser::NewTab", None).ok();
+                    let has_named_entries = new_claude_tab.is_some() || new_browser_tab.is_some();
                     Some(ContextMenu::build(window, cx, |menu, _, _| {
                         menu.when_some(new_claude_tab, |menu, action| {
-                            menu.action("New Claude Code Tab", action).separator()
+                            menu.action("New Claude Code Tab", action)
                         })
+                        .when_some(new_browser_tab, |menu, action| {
+                            menu.action("New Browser Tab", action)
+                        })
+                        .when(has_named_entries, |menu| menu.separator())
                         .action("New File", NewFile.boxed_clone())
                         .action("Open File", ToggleFileFinder::default().boxed_clone())
                         .separator()
@@ -4433,12 +4440,13 @@ fn empty_pane_menu(
     window: &mut Window,
     cx: &mut App,
 ) -> Entity<ContextMenu> {
-    // Claude Code's actions are looked up by name since workspace can't
-    // depend on agent_ui.
+    // Claude Code's and the browser's actions are looked up by name since
+    // workspace can't depend on agent_ui or browser_tab.
     let new_claude_tab = cx.build_action("agent::NewClaudeTab", None).ok();
     let claude_remote_control = cx
         .build_action("agent::StartClaudeRemoteControl", None)
         .ok();
+    let new_browser_tab = cx.build_action("browser::NewTab", None).ok();
     ContextMenu::build(window, cx, |menu, _, _| {
         menu.context(focus_handle)
             .when_some(new_claude_tab, |menu, action| {
@@ -4446,6 +4454,9 @@ fn empty_pane_menu(
             })
             .when_some(claude_remote_control, |menu, action| {
                 menu.action("Claude Code Remote Control", action)
+            })
+            .when_some(new_browser_tab, |menu, action| {
+                menu.action("New Browser Tab", action)
             })
             .separator()
             .action("New Terminal", NewTerminal::default().boxed_clone())
