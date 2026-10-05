@@ -1648,6 +1648,10 @@ pub struct Workspace {
     /// use this instead of going through the `multi_workspace` field to avoid
     /// reading it as we might end up in a double lease otherwise.
     active_workspace_id: Option<Rc<Cell<EntityId>>>,
+    /// OTerminal: shared with the parent `MultiWorkspace`, which is its only
+    /// writer; set while this workspace's window is a project window. A cell
+    /// for the same reason as `active_workspace_id`.
+    in_project_window: Option<Rc<Cell<bool>>>,
     active_worktree_creation: ActiveWorktreeCreation,
     deferred_save_items: Vec<Box<dyn WeakItemHandle>>,
     persisted_recent_navigation_history: Vec<PathBuf>,
@@ -2148,6 +2152,7 @@ impl Workspace {
             sidebar_focus_handle: None,
             multi_workspace,
             active_workspace_id: None,
+            in_project_window: None,
             active_worktree_creation: ActiveWorktreeCreation::default(),
             open_in_dev_container: false,
             _dev_container_task: None,
@@ -2796,6 +2801,9 @@ impl Workspace {
             DockPosition::Right => DockPosition::Left,
             DockPosition::Bottom => return None,
         };
+        if self.is_dock_hidden(opposite_position) {
+            return None;
+        }
 
         let opposite_dock = self.dock_at_position(opposite_position).read(cx);
         let panel = opposite_dock.visible_panel()?;
@@ -2881,7 +2889,23 @@ impl Workspace {
     }
 
     pub fn status_bar_visible(&self, cx: &App) -> bool {
-        StatusBarSettings::get_global(cx).show
+        StatusBarSettings::get_global(cx).show && !self.is_in_project_window()
+    }
+
+    /// OTerminal: whether this workspace's window is a project window (an
+    /// extra window of a project tab). Such a window shows neither the right
+    /// dock nor the status bar.
+    pub fn is_in_project_window(&self) -> bool {
+        self.in_project_window
+            .as_ref()
+            .is_some_and(|in_project_window| in_project_window.get())
+    }
+
+    /// OTerminal: whether the dock at `position` is left out of this window.
+    /// A hidden dock keeps its panels and its open state; it is not rendered
+    /// and cannot be toggled or focused.
+    pub fn is_dock_hidden(&self, position: DockPosition) -> bool {
+        position == DockPosition::Right && self.is_in_project_window()
     }
 
     pub fn multi_workspace(&self) -> Option<&WeakEntity<MultiWorkspace>> {
@@ -2892,6 +2916,7 @@ impl Workspace {
         &mut self,
         multi_workspace: WeakEntity<MultiWorkspace>,
         active_workspace_id: Rc<Cell<EntityId>>,
+        in_project_window: Rc<Cell<bool>>,
         cx: &mut App,
     ) {
         self.status_bar.update(cx, |status_bar, cx| {
@@ -2899,6 +2924,7 @@ impl Workspace {
         });
         self.multi_workspace = Some(multi_workspace);
         self.active_workspace_id = Some(active_workspace_id);
+        self.in_project_window = Some(in_project_window);
     }
 
     pub fn app_state(&self) -> &Arc<AppState> {
@@ -4520,6 +4546,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.is_dock_hidden(dock_side) {
+            return;
+        }
+
         let mut focus_center = false;
         let mut reveal_dock = false;
 
@@ -4753,6 +4783,9 @@ impl Workspace {
         let mut result_panel = None;
         let mut serialize = false;
         for dock in self.all_docks() {
+            if self.is_dock_hidden(dock.read(cx).position()) {
+                continue;
+            }
             if let Some(panel_index) = dock.read(cx).panel_index_for_type::<T>() {
                 let mut focus_center = false;
                 let panel = dock.update(cx, |dock, cx| {
@@ -5719,8 +5752,12 @@ impl Workspace {
             (pane.read(cx).items_len() != 0).then_some(pane)
         };
 
-        let try_dock =
-            |dock: &Entity<Dock>| dock.read(cx).is_open().then(|| Target::Dock(dock.clone()));
+        let right_dock_hidden = self.is_dock_hidden(DockPosition::Right);
+        let try_dock = |dock: &Entity<Dock>| {
+            let dock_state = dock.read(cx);
+            let hidden = right_dock_hidden && dock_state.position() == DockPosition::Right;
+            (dock_state.is_open() && !hidden).then(|| Target::Dock(dock.clone()))
+        };
 
         let sidebar_target = self
             .sidebar_focus_handle
@@ -8647,7 +8684,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut App,
     ) -> Option<Stateful<Div>> {
-        if self.zoomed_position == Some(position) {
+        if self.zoomed_position == Some(position) || self.is_dock_hidden(position) {
             return None;
         }
 
@@ -8752,8 +8789,8 @@ impl Workspace {
         }
 
         let dock_part = |dock: &Entity<Dock>, wrapper: &FocusHandle| {
-            dock.read(cx)
-                .is_open()
+            let dock_state = dock.read(cx);
+            (dock_state.is_open() && !self.is_dock_hidden(dock_state.position()))
                 .then(|| FocusablePart::landmark(wrapper.clone(), dock_content_handle(dock, cx)))
         };
 
@@ -8788,9 +8825,11 @@ impl Workspace {
         ));
         // The status bar is an ARIA toolbar, so region navigation lands on its
         // first control rather than the toolbar container.
-        parts.push(FocusablePart::toolbar(
-            self.status_bar.read(cx).focus_handle(cx),
-        ));
+        if !self.is_in_project_window() {
+            parts.push(FocusablePart::toolbar(
+                self.status_bar.read(cx).focus_handle(cx),
+            ));
+        }
         parts
     }
 
@@ -8985,14 +9024,16 @@ impl Workspace {
         let workspace_width = self.bounds.size.width;
         let mut size = new_size.min(workspace_width - RESIZE_HANDLE_SIZE);
 
-        self.right_dock.read_with(cx, |right_dock, cx| {
-            let right_dock_size = right_dock
-                .stored_active_panel_size(window, cx)
-                .unwrap_or(Pixels::ZERO);
-            if right_dock_size + size > workspace_width {
-                size = workspace_width - right_dock_size
-            }
-        });
+        if !self.is_dock_hidden(DockPosition::Right) {
+            self.right_dock.read_with(cx, |right_dock, cx| {
+                let right_dock_size = right_dock
+                    .stored_active_panel_size(window, cx)
+                    .unwrap_or(Pixels::ZERO);
+                if right_dock_size + size > workspace_width {
+                    size = workspace_width - right_dock_size
+                }
+            });
+        }
 
         let flex_grow = self.dock_flex_for_size(DockPosition::Left, size, window, cx);
         self.left_dock.update(cx, |left_dock, cx| {
@@ -9997,6 +10038,12 @@ impl Render for Workspace {
                                 }
                             })
                             .children(self.zoomed.as_ref().and_then(|view| {
+                                if self
+                                    .zoomed_position
+                                    .is_some_and(|position| self.is_dock_hidden(position))
+                                {
+                                    return None;
+                                }
                                 let zoomed_view = view.upgrade()?;
                                 let div = div()
                                     .occlude()

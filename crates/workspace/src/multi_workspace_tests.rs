@@ -2099,3 +2099,131 @@ async fn test_invalid_persisted_project_windows_are_dropped(cx: &mut TestAppCont
         assert!(!is_window_hidden(window, cx));
     }
 }
+
+#[gpui::test]
+async fn test_project_window_hides_right_dock_and_status_bar(cx: &mut TestAppContext) {
+    use crate::dock::{DockPosition, test::TestPanel};
+
+    let (_project_a, _key_a, _key_b, multi_workspace, cx) = two_project_setup(cx).await;
+
+    // An ordinary window keeps its status bar and its right dock.
+    let main_workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
+    main_workspace.update_in(cx, |workspace, window, cx| {
+        let panel = cx.new(|cx| TestPanel::new(DockPosition::Right, 100, cx));
+        workspace.add_panel(panel, window, cx);
+        workspace.toggle_dock(DockPosition::Right, window, cx);
+
+        assert!(!workspace.is_in_project_window());
+        assert!(workspace.status_bar_visible(cx));
+        assert!(!workspace.is_dock_hidden(DockPosition::Right));
+        assert!(workspace.right_dock().read(cx).is_open());
+        assert!(
+            workspace
+                .render_dock(DockPosition::Right, workspace.right_dock(), window, cx)
+                .is_some()
+        );
+    });
+
+    let project_window = multi_workspace
+        .update_in(cx, |mw, window, cx| mw.open_project_window(window, cx))
+        .expect("opening a project window");
+    cx.run_until_parked();
+    let project_window_workspace = project_window
+        .read_with(cx, |pw, _| pw.workspace().clone())
+        .unwrap();
+
+    project_window
+        .update(cx, |_, window, cx| {
+            project_window_workspace.update(cx, |workspace, cx| {
+                assert!(workspace.is_in_project_window());
+                assert!(!workspace.status_bar_visible(cx));
+                assert!(workspace.is_dock_hidden(DockPosition::Right));
+                assert!(!workspace.is_dock_hidden(DockPosition::Left));
+                assert!(!workspace.is_dock_hidden(DockPosition::Bottom));
+
+                // The right dock is left out even when its state says open.
+                let right_panel = cx.new(|cx| TestPanel::new(DockPosition::Right, 100, cx));
+                workspace.add_panel(right_panel.clone(), window, cx);
+                workspace
+                    .right_dock()
+                    .update(cx, |dock, cx| dock.set_open(true, window, cx));
+                assert!(
+                    workspace
+                        .render_dock(DockPosition::Right, workspace.right_dock(), window, cx)
+                        .is_none()
+                );
+
+                // Toggling it changes nothing, and its panel takes no focus.
+                workspace.toggle_dock(DockPosition::Right, window, cx);
+                assert!(workspace.right_dock().read(cx).is_open());
+                assert!(workspace.focus_panel::<TestPanel>(window, cx).is_none());
+                assert!(!right_panel.read(cx).focus_handle.is_focused(window));
+                workspace
+                    .right_dock()
+                    .update(cx, |dock, cx| dock.set_open(false, window, cx));
+                workspace.toggle_dock(DockPosition::Right, window, cx);
+                assert!(!workspace.right_dock().read(cx).is_open());
+
+                // The other docks work as in any window.
+                let left_panel = cx.new(|cx| TestPanel::new(DockPosition::Left, 101, cx));
+                workspace.add_panel(left_panel, window, cx);
+                workspace.toggle_dock(DockPosition::Left, window, cx);
+                assert!(workspace.left_dock().read(cx).is_open());
+                assert!(
+                    workspace
+                        .render_dock(DockPosition::Left, workspace.left_dock(), window, cx)
+                        .is_some()
+                );
+                assert!(workspace.focus_panel::<TestPanel>(window, cx).is_some());
+            });
+        })
+        .unwrap();
+
+    // The main window is unaffected by owning a project window.
+    main_workspace.read_with(cx, |workspace, cx| {
+        assert!(!workspace.is_in_project_window());
+        assert!(workspace.status_bar_visible(cx));
+    });
+}
+
+#[gpui::test]
+async fn test_project_window_turned_regular_shows_right_dock_and_status_bar(
+    cx: &mut TestAppContext,
+) {
+    use crate::dock::DockPosition;
+
+    let (_project_a, _key_a, _key_b, multi_workspace, cx) = two_project_setup(cx).await;
+    let project_window = multi_workspace
+        .update_in(cx, |mw, window, cx| mw.open_project_window(window, cx))
+        .expect("opening a project window");
+    cx.run_until_parked();
+    let project_window_workspace = project_window
+        .read_with(cx, |pw, _| pw.workspace().clone())
+        .unwrap();
+    assert!(
+        project_window_workspace.read_with(cx, |workspace, _| workspace.is_in_project_window())
+    );
+
+    // Displaying another project in a project window makes it a regular one.
+    let other_project = Project::test(FakeFs::new(cx.executor()), [], cx).await;
+    let other_workspace = project_window
+        .update(cx, |pw, window, cx| {
+            let other_workspace = cx.new(|cx| Workspace::test_new(other_project, window, cx));
+            pw.activate(other_workspace.clone(), None, window, cx);
+            other_workspace
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    project_window
+        .read_with(cx, |pw, cx| {
+            assert!(!pw.is_project_window());
+            for workspace in [&project_window_workspace, &other_workspace] {
+                let workspace = workspace.read(cx);
+                assert!(!workspace.is_in_project_window());
+                assert!(workspace.status_bar_visible(cx));
+                assert!(!workspace.is_dock_hidden(DockPosition::Right));
+            }
+        })
+        .unwrap();
+}

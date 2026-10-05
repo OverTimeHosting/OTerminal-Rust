@@ -333,6 +333,11 @@ pub struct MultiWorkspace {
     pending_project_windows: Vec<SerializedProjectWindow>,
     /// OTerminal: set when this window is itself a project window.
     project_window_owner: Option<ProjectWindowOwner>,
+    /// OTerminal: whether `project_window_owner` is set, shared with each
+    /// member `Workspace` for the same reason as `active_workspace_id`: they
+    /// lay themselves out differently in a project window and must not read
+    /// their parent `MultiWorkspace` to find out.
+    in_project_window: Rc<Cell<bool>>,
     /// OTerminal: when the last project window was opened on request.
     last_opened_project_window: Option<(std::time::Instant, WindowHandle<MultiWorkspace>)>,
 }
@@ -406,7 +411,7 @@ impl MultiWorkspace {
                     for orphan in orphans {
                         orphan
                             .update(cx, |multi_workspace, window, cx| {
-                                multi_workspace.project_window_owner = None;
+                                multi_workspace.set_project_window_owner(None);
                                 window.set_window_hidden(false);
                                 cx.notify();
                             })
@@ -421,8 +426,14 @@ impl MultiWorkspace {
         Self::subscribe_to_workspace(&workspace, window, cx);
         let weak_self = cx.weak_entity();
         let active_workspace_id = Rc::new(Cell::new(workspace.entity_id()));
+        let in_project_window = Rc::new(Cell::new(false));
         workspace.update(cx, |workspace, cx| {
-            workspace.set_multi_workspace(weak_self, active_workspace_id.clone(), cx);
+            workspace.set_multi_workspace(
+                weak_self,
+                active_workspace_id.clone(),
+                in_project_window.clone(),
+                cx,
+            );
         });
         Self {
             window_id: window.window_handle().window_id(),
@@ -443,6 +454,7 @@ impl MultiWorkspace {
             project_windows: Vec::new(),
             pending_project_windows: Vec::new(),
             project_window_owner: None,
+            in_project_window,
             last_opened_project_window: None,
         }
     }
@@ -895,8 +907,9 @@ impl MultiWorkspace {
         Self::subscribe_to_workspace(workspace, window, cx);
         let weak_self = cx.weak_entity();
         let active_workspace_id = self.active_workspace_id.clone();
+        let in_project_window = self.in_project_window.clone();
         workspace.update(cx, |workspace, cx| {
-            workspace.set_multi_workspace(weak_self, active_workspace_id, cx);
+            workspace.set_multi_workspace(weak_self, active_workspace_id, in_project_window, cx);
         });
 
         let entity = cx.entity();
@@ -2233,6 +2246,11 @@ impl MultiWorkspace {
         self.project_window_owner.is_some()
     }
 
+    fn set_project_window_owner(&mut self, owner: Option<ProjectWindowOwner>) {
+        self.in_project_window.set(owner.is_some());
+        self.project_window_owner = owner;
+    }
+
     /// The open project windows of the group `key`, oldest first.
     pub fn project_windows_for_group(
         &self,
@@ -2361,10 +2379,10 @@ impl MultiWorkspace {
                 let workspace_id = workspace.entity_id();
                 cx.new(|cx| {
                     let mut multi_workspace = MultiWorkspace::new(workspace, window, cx);
-                    multi_workspace.project_window_owner = Some(ProjectWindowOwner {
+                    multi_workspace.set_project_window_owner(Some(ProjectWindowOwner {
                         window: owner_window,
                         workspace_id,
-                    });
+                    }));
                     placement.set(Some(current_placement(window, cx)));
                     multi_workspace
                         ._subscriptions
@@ -2456,7 +2474,7 @@ impl MultiWorkspace {
         {
             // Another project was opened here: this is a regular window now.
             let owner_window = owner.window;
-            self.project_window_owner = None;
+            self.set_project_window_owner(None);
             window.set_window_hidden(false);
             cx.defer(move |cx| {
                 owner_window
