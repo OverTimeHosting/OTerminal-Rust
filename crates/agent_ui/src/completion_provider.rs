@@ -199,6 +199,9 @@ impl PromptContextAction {
 pub enum PromptLocalCommand {
     ThumbsUp,
     ThumbsDown,
+    /// OTerminal: continues the thread in a Claude Code session with Remote
+    /// Control.
+    RemoteControl,
 }
 
 impl PromptLocalCommand {
@@ -206,6 +209,7 @@ impl PromptLocalCommand {
         match self {
             Self::ThumbsUp => "helpful",
             Self::ThumbsDown => "not-helpful",
+            Self::RemoteControl => "remote-control",
         }
     }
 
@@ -213,6 +217,7 @@ impl PromptLocalCommand {
         match self {
             Self::ThumbsUp => "Positive Feedback",
             Self::ThumbsDown => "Negative Feedback",
+            Self::RemoteControl => "Remote Control",
         }
     }
 
@@ -224,6 +229,9 @@ impl PromptLocalCommand {
             Self::ThumbsDown => {
                 "Rate this response as not helpful. Sends the current conversation to the Zed team."
             }
+            Self::RemoteControl => {
+                "Continue this thread in a terminal with Remote Control, to use it from claude.ai/code or the Claude mobile app."
+            }
         }
     }
 
@@ -231,6 +239,7 @@ impl PromptLocalCommand {
         match self {
             Self::ThumbsUp => IconName::ThumbsUp,
             Self::ThumbsDown => IconName::ThumbsDown,
+            Self::RemoteControl => IconName::SignalHigh,
         }
     }
 }

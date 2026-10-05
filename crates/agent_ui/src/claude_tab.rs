@@ -16,15 +16,14 @@ use gpui::{
     div,
 };
 use project::Project;
-use terminal_view::terminal_panel::{
-    CLAUDE_REMOTE_CONTROL_PROFILE, NewTerminalWithProfile, TerminalPanel,
-};
+use terminal_view::terminal_panel::TerminalPanel;
 use ui::{Icon, IconName, prelude::*};
 use util::ResultExt as _;
 use workspace::{
-    Item, ItemId, OpenMode, OpenOptions, SerializableItem, Workspace, WorkspaceId,
+    Item, ItemId, OpenMode, OpenOptions, SerializableItem, Toast, Workspace, WorkspaceId,
     WorkspaceMatching,
     item::{ItemEvent, TabContentParams},
+    notifications::NotificationId,
 };
 
 use crate::thread_metadata_store::{ThreadId, ThreadMetadataStore};
@@ -49,17 +48,47 @@ pub fn init(cx: &mut App) {
                 ClaudeTab::move_active_tab_to_new_window(workspace, window, cx);
             })
             .register_action(|workspace, _: &StartClaudeRemoteControl, window, cx| {
-                TerminalPanel::new_terminal_with_profile(
+                let resume_session_id = remote_control_session_id(workspace, window, cx);
+                if resume_session_id.is_some() {
+                    workspace.show_toast(
+                        Toast::new(
+                            NotificationId::unique::<StartClaudeRemoteControl>(),
+                            "This thread continues in the Remote Control terminal. \
+                             Carry on there rather than in the chat while it is open.",
+                        )
+                        .autohide(),
+                        cx,
+                    );
+                }
+                TerminalPanel::new_claude_remote_control_terminal(
                     workspace,
-                    &NewTerminalWithProfile {
-                        profile: CLAUDE_REMOTE_CONTROL_PROFILE.to_string(),
-                    },
+                    resume_session_id,
                     window,
                     cx,
                 );
             });
     })
     .detach();
+}
+
+/// The Claude Code session Remote Control should continue: the thread of the
+/// focused Claude Code tab, else the agent panel's thread. `None` for a thread
+/// without messages, which has no session to resume yet.
+fn remote_control_session_id(workspace: &Workspace, window: &Window, cx: &App) -> Option<String> {
+    let focused_tab = workspace
+        .active_item_as::<ClaudeTab>(cx)
+        .filter(|tab| tab.focus_handle(cx).contains_focused(window, cx));
+    let conversation_view = match focused_tab {
+        Some(tab) => tab.read(cx).conversation_view.clone(),
+        None => workspace
+            .panel::<AgentPanel>(cx)?
+            .read(cx)
+            .active_conversation_view()?
+            .clone(),
+    };
+    let thread = conversation_view.read(cx).root_thread(cx)?;
+    let thread = thread.read(cx);
+    (!thread.entries().is_empty()).then(|| thread.session_id().0.to_string())
 }
 
 #[derive(Default)]

@@ -1187,6 +1187,9 @@ impl ThreadView {
             PromptLocalCommand::ThumbsDown => {
                 self.handle_feedback_click(ThreadFeedback::Negative, window, cx);
             }
+            PromptLocalCommand::RemoteControl => {
+                window.dispatch_action(crate::StartClaudeRemoteControl.boxed_clone(), cx);
+            }
         }
     }
 
@@ -7070,6 +7073,9 @@ impl ThreadView {
         if self.is_thread_feedback_enabled(cx) {
             commands.push(PromptLocalCommand::ThumbsUp);
             commands.push(PromptLocalCommand::ThumbsDown);
+        }
+        if project::DisableAiSettings::claude_code_only(cx) && !self.is_subagent() {
+            commands.push(PromptLocalCommand::RemoteControl);
         }
 
         commands

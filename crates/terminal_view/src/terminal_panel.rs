@@ -1135,6 +1135,37 @@ impl TerminalPanel {
             .detach_and_log_err(cx);
     }
 
+    /// Opens a Claude Code session with Remote Control in the terminal panel.
+    /// With `resume_session_id` it continues that Claude Code session, so a
+    /// thread started elsewhere carries on here with its history.
+    pub fn new_claude_remote_control_terminal(
+        workspace: &mut Workspace,
+        resume_session_id: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Workspace>,
+    ) {
+        let Some(mut spawn_task) =
+            Self::profile_spawn_task(workspace, CLAUDE_REMOTE_CONTROL_PROFILE, cx)
+        else {
+            return;
+        };
+        // When Claude Code is missing the command is a shell printing how to
+        // install it, which must not receive Claude Code's flags.
+        let launches_claude = spawn_task.command.as_deref().is_some_and(is_claude_program);
+        if let Some(session_id) = resume_session_id.filter(|_| launches_claude) {
+            spawn_task.args.push("--resume".to_string());
+            spawn_task.args.push(session_id);
+        }
+        let Some(terminal_panel) = workspace.panel::<Self>(cx) else {
+            return;
+        };
+        terminal_panel
+            .update(cx, |this, cx| {
+                this.add_terminal_task(spawn_task, RevealStrategy::Always, window, cx)
+            })
+            .detach_and_log_err(cx);
+    }
+
     /// Resolves a terminal profile into a task that runs its program as an
     /// interactive terminal in the panel.
     fn profile_spawn_task(workspace: &Workspace, name: &str, cx: &App) -> Option<SpawnInTerminal> {
