@@ -863,6 +863,29 @@ impl Hitbox {
             .any(|id| self.id == *id)
     }
 
+    /// OTerminal: the parts of this hitbox that hitboxes in front of it block the mouse from in
+    /// the rendered frame (`InteractiveElement::occlude` and `block_mouse_except_scroll`
+    /// elements such as menus, popovers and modals). An element standing in for a native child
+    /// window uses this to know where GPUI draws over it.
+    pub fn occluded_areas(&self, window: &Window) -> Vec<Bounds<Pixels>> {
+        let own_bounds = self.bounds.intersect(&self.content_mask.bounds);
+        window
+            .rendered_frame
+            .hitboxes
+            .iter()
+            .rev()
+            .take_while(|hitbox| hitbox.id != self.id)
+            .filter(|hitbox| hitbox.behavior != HitboxBehavior::Normal)
+            .map(|hitbox| {
+                hitbox
+                    .bounds
+                    .intersect(&hitbox.content_mask.bounds)
+                    .intersect(&own_bounds)
+            })
+            .filter(|area| area.size.width > px(0.) && area.size.height > px(0.))
+            .collect()
+    }
+
     /// Checks if the hitbox contains the mouse and should handle scroll events. Typically this
     /// should only be used when handling `ScrollWheelEvent`, and otherwise `is_hovered` should be
     /// used. See the documentation of `Hitbox::is_hovered` for details about this distinction.

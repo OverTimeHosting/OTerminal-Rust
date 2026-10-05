@@ -3,11 +3,17 @@
 //! step with what GPUI draws.
 //!
 //! A child window is composed above everything GPUI paints and stays on
-//! screen when GPUI stops painting the element it stands for, so it is shown
-//! only while the content element is in the rendered frame with nothing in
-//! front of it, and hidden otherwise.
+//! screen when GPUI stops painting the element it stands for. So it is shown
+//! only while the content element is in the rendered frame, and wherever
+//! GPUI draws something in front of that element (a menu, a popover, a
+//! modal) a hole is cut into the child window for it to show through.
 
-use std::{cell::Cell, ffi::c_void, num::NonZeroIsize, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    ffi::c_void,
+    num::NonZeroIsize,
+    rc::Rc,
+};
 
 use anyhow::{Context as _, Result, anyhow};
 use futures::{
@@ -16,8 +22,8 @@ use futures::{
 };
 use gpui::{
     AnyElement, AppContext as _, Bounds, Context, DispatchPhase, Hitbox, HitboxBehavior,
-    IntoElement, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point,
-    SharedString, Styled, Task, WeakEntity, Window, canvas, div, point, px,
+    IntoElement, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, SharedString,
+    Styled, Task, WeakEntity, Window, canvas, div, px,
 };
 use raw_window_handle::{
     HandleError, HasWindowHandle, RawWindowHandle, Win32WindowHandle, WindowHandle,
@@ -26,6 +32,7 @@ use ui::{Color, FluentBuilder as _, Label, LabelCommon as _, LabelSize};
 use util::ResultExt as _;
 use windows::Win32::{
     Foundation::HWND,
+    Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, RGN_DIFF, SetWindowRgn},
     UI::{Input::KeyboardAndMouse::GetFocus, WindowsAndMessaging::IsChild},
 };
 use wry::{
@@ -38,11 +45,7 @@ use crate::{BrowserTab, PageEvent};
 /// Overlays that open a few frames after the input that caused them are
 /// still noticed.
 const CHECKS_AFTER_INPUT: u8 = 3;
-const MAX_SAMPLE_COLUMNS: usize = 16;
-const MAX_SAMPLE_ROWS: usize = 28;
-const SAMPLE_COLUMN_SPACING: f32 = 120.;
-const SAMPLE_ROW_SPACING: f32 = 32.;
-const SAMPLE_EDGE_INSET: f32 = 12.;
+const MIN_OVERLAY_SIZE: Pixels = px(24.);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct ParentWindow(NonZeroIsize);
@@ -96,6 +99,9 @@ struct WebView {
     parent: Cell<ParentWindow>,
     placement: Cell<Option<Rect>>,
     visible: Cell<bool>,
+    /// The holes last cut into the page's window, with the page size they
+    /// were cut for.
+    holes: RefCell<Option<(Vec<PageRect>, i32, i32)>>,
 }
 
 impl WebView {
@@ -140,6 +146,7 @@ impl WebView {
             parent: Cell::new(parent),
             placement: Cell::new(None),
             visible: Cell::new(false),
+            holes: RefCell::new(None),
         })
     }
 
@@ -163,6 +170,51 @@ impl WebView {
             wry_result(self.inner.set_visible(true))?;
             self.visible.set(true);
         }
+        Ok(())
+    }
+
+    /// Cuts `holes` out of the page's window, so GPUI's drawing shows there
+    /// and takes the mouse. Windows clips a child window (and the WebView2
+    /// windows inside it) to its window region.
+    fn set_holes(&self, holes: &[PageRect], width: i32, height: i32) -> Result<()> {
+        let unchanged =
+            self.holes
+                .borrow()
+                .as_ref()
+                .is_some_and(|(current, current_width, current_height)| {
+                    current == holes && (*current_width, *current_height) == (width, height)
+                });
+        if unchanged {
+            return Ok(());
+        }
+        let mut page_window = HWND::default();
+        // SAFETY: the controller is alive as long as `self.inner`, and the
+        // regions are created, combined and released within this block; a
+        // region handed to `SetWindowRgn` successfully is owned by the
+        // system from then on.
+        unsafe {
+            self.inner
+                .controller()
+                .ParentWindow(&mut page_window)
+                .context("getting the page's window")?;
+            if holes.is_empty() {
+                if SetWindowRgn(page_window, None, true) == 0 {
+                    return Err(anyhow!("clearing the page window's region failed"));
+                }
+            } else {
+                let region = CreateRectRgn(0, 0, width, height);
+                for hole in holes {
+                    let hole_region = CreateRectRgn(hole.left, hole.top, hole.right, hole.bottom);
+                    CombineRgn(Some(region), Some(region), Some(hole_region), RGN_DIFF);
+                    DeleteObject(hole_region.into()).ok().log_err();
+                }
+                if SetWindowRgn(page_window, Some(region), true) == 0 {
+                    DeleteObject(region.into()).ok().log_err();
+                    return Err(anyhow!("setting the page window's region failed"));
+                }
+            }
+        }
+        *self.holes.borrow_mut() = Some((holes.to_vec(), width, height));
         Ok(())
     }
 
@@ -240,7 +292,6 @@ pub(crate) struct Page {
     paint_tracker: Rc<PaintTracker>,
     painted: Option<PaintedContent>,
     obscured: bool,
-    obscured_at: Option<Point<Pixels>>,
     remaining_checks: u8,
     check_scheduled: bool,
     _event_task: Task<()>,
@@ -269,7 +320,6 @@ impl Page {
             paint_tracker: Rc::default(),
             painted: None,
             obscured: false,
-            obscured_at: None,
             remaining_checks: 0,
             check_scheduled: false,
             _event_task: event_task,
@@ -425,7 +475,7 @@ impl Page {
             .when(self.obscured, |this| {
                 this.child(
                     div().absolute().inset_0().p_4().child(
-                        Label::new("The page is hidden while something is shown over it.")
+                        Label::new("The page is hidden while something covers it.")
                             .size(LabelSize::Small)
                             .color(Color::Muted),
                     ),
@@ -445,34 +495,6 @@ fn request_checks(
         tab.request_visibility_checks(frames, window, cx)
     })
     .log_err();
-}
-
-/// Points spread over `bounds`, dense enough that a menu, popover, modal or
-/// notification laid over the page covers at least one of them.
-fn sample_points(bounds: Bounds<Pixels>) -> Vec<Point<Pixels>> {
-    // Dock resize handles overlap the edges of a pane by a few pixels and
-    // take the mouse there without covering the page.
-    let inset = SAMPLE_EDGE_INSET;
-    let width = f32::from(bounds.size.width) - 2. * inset;
-    let height = f32::from(bounds.size.height) - 2. * inset;
-    if width <= 0. || height <= 0. {
-        return Vec::new();
-    }
-    let columns =
-        ((width / SAMPLE_COLUMN_SPACING).ceil() as usize + 1).clamp(2, MAX_SAMPLE_COLUMNS);
-    let rows = ((height / SAMPLE_ROW_SPACING).ceil() as usize + 1).clamp(2, MAX_SAMPLE_ROWS);
-    let left = f32::from(bounds.origin.x) + inset;
-    let top = f32::from(bounds.origin.y) + inset;
-    let mut points = Vec::with_capacity(columns * rows);
-    for row in 0..rows {
-        for column in 0..columns {
-            points.push(point(
-                px(left + width * column as f32 / (columns - 1) as f32),
-                px(top + height * row as f32 / (rows - 1) as f32),
-            ));
-        }
-    }
-    points
 }
 
 impl BrowserTab {
@@ -566,8 +588,9 @@ impl BrowserTab {
         });
     }
 
-    /// Shows the page where its content element was last painted, or hides
-    /// it when something in the rendered frame is in front of that element.
+    /// Shows the page where its content element was last painted, with holes
+    /// where GPUI draws over that element, or hides it when it is covered
+    /// entirely.
     fn sync_visibility(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(web_view) = self.page.web_view.clone() else {
             return;
@@ -579,45 +602,104 @@ impl BrowserTab {
             return;
         };
         let bounds = painted.bounds;
+        let scale_factor = window.scale_factor();
 
-        // Anything drawn over the page that takes the mouse (menus,
-        // popovers, modals, notifications, a zoomed panel) also stops this
-        // hitbox from being hovered there. A dragged tab or file has no
-        // hitbox but is drawn over the page too.
-        let obscured_at = if cx.has_active_drag() {
-            Some(bounds.center())
-        } else {
-            self.page
-                .obscured_at
-                .into_iter()
-                .filter(|point| bounds.contains(point))
-                .chain(sample_points(bounds))
-                .find(|point| !painted.hitbox.is_hovered_at(*point, window))
-        };
-        self.page.obscured_at = obscured_at;
+        // Anything GPUI draws over the page that takes the mouse (menus,
+        // popovers, modals, notifications, a zoomed panel) is a hitbox in
+        // front of this one.
+        let occluded_areas = painted.hitbox.occluded_areas(window);
+        let mut holes = page_holes(bounds, &occluded_areas, scale_factor);
+        let page = physical_rect(bounds, scale_factor);
+        let page_size = page.size.to_physical::<i32>(1.);
+        // A modal's backdrop takes the mouse everywhere, which would hide the
+        // page altogether. Only what is drawn in front of the backdrop (the
+        // modal itself) needs to show over the page.
+        let modal_open = self
+            .modal_layer
+            .as_ref()
+            .is_some_and(|modal_layer| modal_layer.read(cx).has_active_modal());
+        if modal_open
+            && let Some(backdrop) = holes
+                .iter()
+                .position(|hole| hole.covers(page_size.width, page_size.height))
+            && backdrop > 0
+        {
+            holes.truncate(backdrop);
+        }
+        // A dragged tab or file has no hitbox but is drawn over the page too.
+        let hidden = cx.has_active_drag()
+            || holes
+                .iter()
+                .any(|hole| hole.covers(page_size.width, page_size.height));
 
-        let obscured = obscured_at.is_some();
-        if obscured {
+        if hidden {
             web_view.hide().log_err();
-            // Nothing announces the overlay going away (it may be dismissed
-            // from the keyboard), so keep looking until it has.
-            self.request_visibility_checks(1, window, cx);
         } else {
-            let shown = ParentWindow::new(window)
-                .and_then(|parent| web_view.show_at(parent, bounds, window.scale_factor()));
+            let shown = ParentWindow::new(window).and_then(|parent| {
+                web_view.show_at(parent, bounds, scale_factor)?;
+                web_view.set_holes(&holes, page_size.width, page_size.height)
+            });
             shown.log_err();
         }
-        if obscured != self.page.obscured {
-            self.page.obscured = obscured;
+
+        // Nothing announces an overlay moving or going away (it may be
+        // dismissed from the keyboard), so keep looking while there is one.
+        // Dock resize handles overlap the edges of a pane permanently and
+        // are too thin to be one.
+        let has_overlay = occluded_areas.iter().any(|area| {
+            area.size.width >= MIN_OVERLAY_SIZE && area.size.height >= MIN_OVERLAY_SIZE
+        });
+        if hidden || has_overlay {
+            self.request_visibility_checks(1, window, cx);
+        }
+        if hidden != self.page.obscured {
+            self.page.obscured = hidden;
             cx.notify();
         }
     }
 }
 
+/// A rectangle in the page's own device pixels, relative to its top left.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PageRect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+impl PageRect {
+    fn covers(&self, width: i32, height: i32) -> bool {
+        self.left <= 0 && self.top <= 0 && self.right >= width && self.bottom >= height
+    }
+}
+
+/// Where GPUI draws over the page, front to back, on the same pixel grid as
+/// [`physical_rect`].
+fn page_holes(
+    bounds: Bounds<Pixels>,
+    occluded_areas: &[Bounds<Pixels>],
+    scale_factor: f32,
+) -> Vec<PageRect> {
+    let scale = |pixels: Pixels| (f32::from(pixels) * scale_factor).round() as i32;
+    let page_left = scale(bounds.origin.x);
+    let page_top = scale(bounds.origin.y);
+    occluded_areas
+        .iter()
+        .map(|area| PageRect {
+            left: scale(area.origin.x) - page_left,
+            top: scale(area.origin.y) - page_top,
+            right: scale(area.origin.x + area.size.width) - page_left,
+            bottom: scale(area.origin.y + area.size.height) - page_top,
+        })
+        .filter(|hole| hole.right > hole.left && hole.bottom > hole.top)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::size;
+    use gpui::{point, size};
 
     fn rect(x: i32, y: i32, width: u32, height: u32) -> Rect {
         Rect {
@@ -642,33 +724,38 @@ mod tests {
     }
 
     #[test]
-    fn sample_points_cover_the_edges_and_stay_inside() {
-        let bounds = Bounds::new(point(px(10.), px(20.)), size(px(1000.), px(500.)));
-        let points = sample_points(bounds);
-        assert!(points.len() <= MAX_SAMPLE_COLUMNS * MAX_SAMPLE_ROWS);
-        assert!(points.iter().all(|point| bounds.contains(point)));
-        assert!(points.contains(&point(
-            px(10. + SAMPLE_EDGE_INSET),
-            px(20. + SAMPLE_EDGE_INSET)
-        )));
-        assert!(points.contains(&point(
-            px(1010. - SAMPLE_EDGE_INSET),
-            px(520. - SAMPLE_EDGE_INSET)
-        )));
-
-        let mut columns: Vec<f32> = points.iter().map(|point| f32::from(point.x)).collect();
-        columns.sort_by(f32::total_cmp);
-        columns.dedup();
-        assert!(
-            columns
-                .windows(2)
-                .all(|pair| pair[1] - pair[0] <= SAMPLE_COLUMN_SPACING)
+    fn page_holes_are_relative_to_the_page() {
+        let bounds = Bounds::new(point(px(100.), px(40.)), size(px(800.), px(600.)));
+        let menu = Bounds::new(point(px(300.), px(40.)), size(px(200.), px(120.)));
+        assert_eq!(
+            page_holes(bounds, &[menu], 1.),
+            [PageRect {
+                left: 200,
+                top: 0,
+                right: 400,
+                bottom: 120
+            }]
         );
+        assert_eq!(
+            page_holes(bounds, &[menu], 1.5),
+            [PageRect {
+                left: 300,
+                top: 0,
+                right: 600,
+                bottom: 180
+            }]
+        );
+        assert!(page_holes(bounds, &[], 1.).is_empty());
     }
 
     #[test]
-    fn sample_points_of_empty_bounds() {
-        let bounds = Bounds::new(point(px(0.), px(0.)), size(px(1.), px(0.)));
-        assert!(sample_points(bounds).is_empty());
+    fn a_hole_over_the_whole_page_covers_it() {
+        let bounds = Bounds::new(point(px(100.), px(40.)), size(px(800.), px(600.)));
+        let holes = page_holes(bounds, &[bounds], 1.25);
+        assert_eq!(holes.len(), 1);
+        assert!(holes[0].covers(1000, 750));
+
+        let menu = Bounds::new(point(px(300.), px(40.)), size(px(200.), px(120.)));
+        assert!(!page_holes(bounds, &[menu], 1.25)[0].covers(1000, 750));
     }
 }

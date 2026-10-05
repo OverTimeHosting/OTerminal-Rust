@@ -20,7 +20,9 @@ use gpui::{
 use project::Project;
 use ui::{ContextMenu, Icon, IconButton, IconName, Tooltip, prelude::*, right_click_menu};
 use util::ResultExt as _;
-use workspace::{Item, ItemId, SerializableItem, Workspace, WorkspaceId, item::ItemEvent};
+use workspace::{
+    Item, ItemId, ModalLayer, SerializableItem, Workspace, WorkspaceId, item::ItemEvent,
+};
 
 pub use bookmarks::{Bookmark, BookmarkStore};
 
@@ -217,6 +219,7 @@ pub struct BrowserTab {
     bookmark_store: Option<Entity<BookmarkStore>>,
     page: Page,
     window: AnyWindowHandle,
+    modal_layer: Option<Entity<ModalLayer>>,
     _subscriptions: Vec<Subscription>,
     _workspace_subscriptions: Vec<Subscription>,
 }
@@ -264,6 +267,7 @@ impl BrowserTab {
             bookmark_store,
             page: Page::new(cx),
             window: window.window_handle(),
+            modal_layer: None,
             _subscriptions: subscriptions,
             _workspace_subscriptions: Vec::new(),
         }
@@ -551,6 +555,7 @@ impl Item for BrowserTab {
         cx: &mut Context<Self>,
     ) {
         self.window = window.window_handle();
+        self.modal_layer = Some(workspace.modal_layer().clone());
         // Modals, notifications and zoomed panels are drawn over the page by
         // the workspace without this tab being repainted.
         let mut subscriptions =
