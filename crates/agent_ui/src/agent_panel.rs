@@ -6727,6 +6727,28 @@ impl AgentPanel {
                         focus_handle.dispatch_action(&crate::StartClaudeRemoteControl, window, cx);
                     })
             });
+            // OTerminal: the thread can live in a center tab instead of the
+            // panel; the same entry sits in the title's dropdown.
+            let has_thread = self
+                .active_conversation_view()
+                .is_some_and(|view| view.read(cx).root_thread_view().is_some());
+            let open_in_tab_button = (has_thread && DisableAiSettings::claude_code_only(cx))
+                .then(|| {
+                    let tooltip_focus_handle = focus_handle.clone();
+                    IconButton::new("open_thread_in_tab_btn", IconName::ArrowUpRight)
+                        .icon_size(IconSize::Small)
+                        .tooltip(move |_window, cx| {
+                            Tooltip::for_action_in(
+                                "Open in Tab",
+                                &OpenThreadInTab,
+                                &tooltip_focus_handle,
+                                cx,
+                            )
+                        })
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_active_thread_in_tab(window, cx);
+                        }))
+                });
             let new_thread_menu = PopoverMenu::new("new_thread_menu")
                 .trigger_with_tooltip(
                     IconButton::new("new_thread_menu_btn", IconName::Plus)
@@ -6776,6 +6798,7 @@ impl AgentPanel {
                         .flex_none()
                         .gap_1()
                         .children(sandbox_status)
+                        .children(open_in_tab_button)
                         .children(remote_control_button)
                         .when(
                             can_create_entries,
