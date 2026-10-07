@@ -4375,7 +4375,47 @@ mod tests {
     }
 }
 
+struct BuiltinMcpServer(acp::McpServerSse);
+
+impl gpui::Global for BuiltinMcpServer {}
+
+/// OTerminal: an SSE MCP server run by the app itself, given to every agent session of
+/// a local project. A server the user configured under the same name takes its place.
+pub fn set_builtin_mcp_server(
+    name: String,
+    url: String,
+    headers: Vec<(String, String)>,
+    cx: &mut App,
+) {
+    cx.set_global(BuiltinMcpServer(
+        acp::McpServerSse::new(name, url).headers(
+            headers
+                .into_iter()
+                .map(|(name, value)| acp::HttpHeader::new(name, value))
+                .collect(),
+        ),
+    ));
+}
+
 fn mcp_servers_for_project(project: &Entity<Project>, cx: &App) -> Vec<acp::McpServer> {
+    let mut servers = configured_mcp_servers_for_project(project, cx);
+    if project.read(cx).is_local()
+        && let Some(builtin) = cx.try_global::<BuiltinMcpServer>()
+    {
+        let is_configured = servers.iter().any(|server| match server {
+            acp::McpServer::Http(server) => server.name == builtin.0.name,
+            acp::McpServer::Sse(server) => server.name == builtin.0.name,
+            acp::McpServer::Stdio(server) => server.name == builtin.0.name,
+            _ => false,
+        });
+        if !is_configured {
+            servers.push(acp::McpServer::Sse(builtin.0.clone()));
+        }
+    }
+    servers
+}
+
+fn configured_mcp_servers_for_project(project: &Entity<Project>, cx: &App) -> Vec<acp::McpServer> {
     let context_server_store = project.read(cx).context_server_store().read(cx);
     let is_local = project.read(cx).is_local();
     context_server_store

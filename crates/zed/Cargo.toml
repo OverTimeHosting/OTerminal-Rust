@@ -172,6 +172,7 @@ notifications.workspace = true
 onboarding.workspace = true
 othcloud_client.workspace = true
 othcloud_github.workspace = true
+othcloud_mcp.workspace = true
 othcloud_panel.workspace = true
 othcloud_terminal_profiles.workspace = true
 outline.workspace = true

@@ -787,6 +787,7 @@ fn main() {
         // A push GitHub refuses says which account was used and offers another.
         git_ui::set_push_access_denied_handler(othcloud_github::handle_push_access_denied, cx);
         othcloud_panel::init(cx);
+        othcloud_mcp::init(cx);
         othcloud_terminal_profiles::init(cx);
         project_tabs::init(cx);
         journal::init(app_state.clone(), cx);

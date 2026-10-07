@@ -12674,6 +12674,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "othcloud_mcp"
+version = "0.1.0"
+dependencies = [
+ "agent_servers",
+ "anyhow",
+ "askpass",
+ "browser_tab",
+ "collections",
+ "editor",
+ "futures 0.3.34",
+ "git",
+ "gpui",
+ "log",
+ "parking_lot",
+ "project",
+ "rand 0.9.4",
+ "serde",
+ "serde_json",
+ "smol",
+ "task",
+ "terminal",
+ "text",
+ "url",
+ "util",
+ "workspace",
+]
+
+[[package]]
 name = "othcloud_panel"
 version = "0.1.0"
 dependencies = [
@@ -23304,6 +23332,7 @@ dependencies = [
  "onboarding",
  "othcloud_client",
  "othcloud_github",
+ "othcloud_mcp",
  "othcloud_panel",
  "othcloud_terminal_profiles",
  "outline",

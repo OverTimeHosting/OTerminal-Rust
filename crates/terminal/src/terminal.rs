@@ -651,6 +651,16 @@ const DEBUG_TERMINAL_HEIGHT: Pixels = px(30.);
 const DEBUG_CELL_WIDTH: Pixels = px(5.);
 const DEBUG_LINE_HEIGHT: Pixels = px(5.);
 
+static LOCAL_TERMINAL_ENV: parking_lot::RwLock<Vec<(String, String)>> =
+    parking_lot::RwLock::new(Vec::new());
+
+/// OTerminal: variables added to every terminal started on this machine from now on,
+/// replacing the ones set by an earlier call. They describe services of this app
+/// instance (the MCP server), so terminals started on a remote host do not get them.
+pub fn set_local_terminal_env(variables: Vec<(String, String)>) {
+    *LOCAL_TERMINAL_ENV.write() = variables;
+}
+
 /// Inserts OTerminal-specific (Zed-compatible) environment variables for terminal sessions.
 /// Used by both local terminals and remote terminals (via SSH).
 pub fn insert_zed_terminal_env(
@@ -1134,6 +1144,9 @@ impl TerminalBuilder {
             }
 
             insert_zed_terminal_env(&mut env, &version);
+            if !is_remote_terminal {
+                env.extend(LOCAL_TERMINAL_ENV.read().iter().cloned());
+            }
 
             #[derive(Default)]
             struct ShellParams {

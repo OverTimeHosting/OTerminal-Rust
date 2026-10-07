@@ -158,6 +158,7 @@ members = [
     "crates/opencode",
     "crates/othcloud_client",
     "crates/othcloud_github",
+    "crates/othcloud_mcp",
     "crates/othcloud_panel",
     "crates/othcloud_terminal_profiles",
     "crates/outline",
@@ -435,6 +436,7 @@ openai_subscribed = { path = "crates/openai_subscribed" }
 opencode = { path = "crates/opencode" }
 othcloud_client = { path = "crates/othcloud_client" }
 othcloud_github = { path = "crates/othcloud_github" }
+othcloud_mcp = { path = "crates/othcloud_mcp" }
 othcloud_panel = { path = "crates/othcloud_panel" }
 othcloud_terminal_profiles = { path = "crates/othcloud_terminal_profiles" }
 outline = { path = "crates/outline" }
